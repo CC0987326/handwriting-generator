@@ -1,0 +1,73 @@
+plugins {
+    id 'com.android.application'
+}
+
+// 版本号：与网页层 js/catalog.js 的 HW.appVersion 对齐（build-apk.ps1 会传 -PappVer=… 覆盖）
+def appVer = project.hasProperty('appVer') ? project.appVer : '1.2.0'
+def appVerCode = project.hasProperty('appVerCode') ? project.appVerCode.toInteger() : 10200
+
+// 从 android/keystore.properties 读签名（该文件不入库；缺失时打未签名 release）
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+def hasReleaseSigning = false
+if (keystorePropsFile.exists()) {
+    keystoreProps.load(new FileInputStream(keystorePropsFile))
+    hasReleaseSigning = true
+}
+
+android {
+    namespace 'com.handwriting.generator'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.handwriting.generator'
+        minSdk 24
+        targetSdk 34
+        versionCode appVerCode
+        versionName appVer
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseSigning) signingConfig signingConfigs.release
+        }
+        debug {
+            // 调试包直接用默认 debug 签名，免配置
+        }
+    }
+
+    // 网页资源体积大（字体 ~72MB），打包不再二次压缩（已在 build-apk.ps1 里用 store 打包成 zip，压缩过反而更慢）
+    packaging {
+        resources {
+            excludes += ['META-INF/*.kotlin_module']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // assets/web 由 build-apk.ps1 拷贝，禁掉 Gradle 的资源合并对它的处理
+    androidResources {
+        noCompress += ['ttf', 'otf', 'woff2']
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.webkit:webkit:1.11.0'
+}

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 无 ActionBar；背景用纸色，避免加载时白闪 -->
+    <style name="Theme.HW" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#f7f2e6</item>
+        <item name="android:statusBarColor">#f7f2e6</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

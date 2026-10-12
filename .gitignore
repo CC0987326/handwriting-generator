@@ -1,7 +1,17 @@
 node_modules/
 dist/
 dist-lite/
+dist-apk/
 cache/
 .impeccable/
 *.log
 _*cap.html
+
+# Android：本地环境/密钥/构建产物
+android/local.properties
+android/keystore.properties
+android/*.keystore
+android/.gradle/
+android/build/
+android/app/build/
+android/app/src/main/assets/web/

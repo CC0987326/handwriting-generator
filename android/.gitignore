@@ -1,0 +1,9 @@
+# 本地环境与产物，不入库
+local.properties
+keystore.properties
+*.keystore
+*.jks
+.gradle/
+build/
+app/build/
+app/src/main/assets/web/

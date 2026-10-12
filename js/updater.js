@@ -29,6 +29,11 @@
   function store(k, v) { try { localStorage.setItem(k, v); } catch (e) { } }
 
   function openExternal(url) {
+    // Android 外壳：window.open 会被 WebView 拦，退回 location.href 又会把界面本身导航走，
+    // 必须走原生 Intent 交给系统浏览器。
+    if (window.HWAndroid && window.HWAndroid.openExternal) {
+      try { window.HWAndroid.openExternal(url); return; } catch (e) { }
+    }
     // 浏览器/WebView2 弹新窗口；Electron 的 setWindowOpenHandler 会转 system browser
     try {
       var w = window.open(url, '_blank');
@@ -36,6 +41,17 @@
     } catch (e) { }
     try { location.href = url; } catch (e) { }
   }
+
+  // 在 Release 的附件里挑出「网页热更包」（web-<ver>.zip）
+  function assetUrl(j, matcher) {
+    var arr = (j && j.assets) || [];
+    for (var i = 0; i < arr.length; i++) {
+      if (matcher(arr[i].name)) return arr[i].browser_download_url || '';
+    }
+    return '';
+  }
+  function webZipUrl(j) { var v = parseVer(j.tag_name || j.name); return v ? assetUrl(j, function (n) { return n.indexOf('web-' + v.join('.')) === 0 && /\.zip$/i.test(n); }) : ''; }
+  function apkUrl(j) { return assetUrl(j, function (n) { return /\.apk$/i.test(n); }); }
 
   function card(cur, latest, url) {
     if (document.getElementById('hw-update-card')) return;
@@ -90,6 +106,21 @@
       var lv = parseVer(j.tag_name || j.name);
       if (!lv || !gt(lv, cv)) return;                    // 没有更新
       if (stored(DISMISS_KEY) === (j.tag_name || j.name)) return;   // 这版已忽略过
+
+      // Android 外壳：网页改动能热更就不重装 —— 直接后台下载新网页包并切换，
+      // 只有原生外壳本身需要升级、或没有热更包时，才回退到「下载新 APK」。
+      var an = window.HWAndroid;
+      if (an && an.installUpdate) {
+        var zip = webZipUrl(j);
+        var needNative = j.requires_native;   // 约定：Release 正文可写 requires_native 字段（可选）
+        if (zip) {
+          store(DISMISS_KEY, j.tag_name || j.name);      // 热更静默进行，不再弹卡片
+          try { an.installUpdate(zip, lv.join('.')); } catch (e) { }
+          return;
+        }
+        if (apkUrl(j)) { card(cur, j.tag_name || j.name, apkUrl(j)); return; }
+      }
+
       var url = j.html_url || PAGE;
       card(cur, j.tag_name || j.name, url);
     }).catch(function () { /* 离线/网络失败：静默 */ });

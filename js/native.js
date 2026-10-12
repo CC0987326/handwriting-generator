@@ -15,6 +15,7 @@
 
   var wv = window.chrome && window.chrome.webview;                          // 轻量 exe 外壳
   var el = window.hwNative;                                                 // Electron preload
+  var and = window.HWAndroid;                                               // Android 原生外壳
   var hasDirPick = typeof window.showDirectoryPicker === 'function';
   var hasFilePick = typeof window.showSaveFilePicker === 'function';
 
@@ -125,6 +126,25 @@
     };
   }
 
+  /* ---------- 3.5) Android 原生外壳：保存到相册 ----------
+   * 页面→HWAndroid.saveImage(name, base64)：原生存进系统相册（Pictures/手写作业生成器），
+   * 返回可达 content:// URI，便于随后「分享」。Android WebView 里 <a download> 基本无效，
+   * 故这一支必须走原生。多张时逐张串行写，与原协议一致。 */
+  function andBackend() {
+    return {
+      begin: function () { return Promise.resolve({ label: '手机相册（Pictures/手写作业生成器）' }); },
+      write: function (ctx, name, blob) {
+        return blobToB64(blob).then(function (b64) {
+          var ret = and.saveImage(name, b64);
+          var r = (typeof ret === 'string') ? JSON.parse(ret) : ret;
+          if (r && r.ok) { (ctx.uris = ctx.uris || []).push(r.uri); return; }
+          throw new Error((r && r.error) || '保存失败');
+        });
+      },
+      end: function () { }
+    };
+  }
+
   /* ---------- 兜底：传统下载 ---------- */
   function dlBackend() {
     var last = 0;
@@ -143,18 +163,20 @@
   function backendFor() {
     if (wv) return wvBackend();
     if (el && el.beginSave) return elBackend();
+    if (and && and.saveImage) return andBackend();
     if (hasDirPick || hasFilePick) return fsBackend();
     return dlBackend();
   }
 
-  function run(backend, items, renderFn, onProgress) {
+  function run(backend, items, renderFn, onProgress, onCtx) {
     // begin 必须同步发起：浏览器「文件系统访问 API」要求选路径发生在用户点击手势内。
-    var ctxP;
+    var ctxP, ctxRef = null;
     try { ctxP = Promise.resolve(backend.begin(items.length, items[0].name)); }
     catch (e) { ctxP = Promise.reject(e); }
     return ctxP
       .then(function (ctx) {
         if (!ctx) return { canceled: true };
+        ctxRef = ctx;
         var i = 0;
         function step() {
           if (i >= items.length) return { ok: true, label: ctx.label, count: items.length };
@@ -169,17 +191,26 @@
         }
         return step();
       })
-      .then(function (r) { if (backend.end) { try { backend.end(); } catch (e) { } } return r; });
+      .then(function (r) { if (backend.end) { try { backend.end(); } catch (e) { } } return r; })
+      .then(function (r) { if (onCtx && ctxRef) { try { onCtx(ctxRef); } catch (e) { } } return r; });
   }
 
   HW.native = {
-    kind: wv ? 'webview2' : (el ? 'electron' : ((hasDirPick || hasFilePick) ? 'fsapi' : 'download')),
+    kind: wv ? 'webview2'
+      : (el && el.beginSave) ? 'electron'
+      : (and && and.saveImage) ? 'android'
+      : ((hasDirPick || hasFilePick) ? 'fsapi' : 'download'),
+    // 最近一次导出落到的 content:// URI（Android 分支填，分享用）
+    lastUris: [],
 
     /* items: [{name}]；renderFn(item, idx) -> Promise<Blob>
      * 返回 {ok, label, count} | {canceled:true} | {error} */
     exportAll: function (items, renderFn, onProgress) {
       var b = backendFor();
-      return run(b, items, renderFn, onProgress).catch(function (err) {
+      HW.native.lastUris = [];                 // 每次导出重置
+      return run(b, items, renderFn, onProgress, function (ctx) {
+        if (ctx && ctx.uris && ctx.uris.length) HW.native.lastUris = ctx.uris;
+      }).catch(function (err) {
         var name = err && err.name;
         if (name === 'AbortError') return { canceled: true };
         // 文件系统访问 API 在 file:// 等场景不可用 → 静默回退传统下载

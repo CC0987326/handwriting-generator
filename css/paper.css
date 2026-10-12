@@ -308,3 +308,33 @@ body.line-edit .page-holder canvas{cursor:grab}
   .desk{overflow:visible;min-height:60vh}
   .preview{overflow:visible}
 }
+
+/* ---------- 手机 / 窄屏触控打磨（<=640px，也含窄浏览器窗口） ---------- */
+@media (max-width:640px){
+  /* 逐行微调工具栏展开时不再把 deskbar 撑到横向溢出 */
+  .deskbar{flex-wrap:wrap;gap:8px}
+  .deskbar .spacer{flex-basis:100%;height:0}
+  .deskbar .modes{flex-wrap:wrap;gap:8px}
+  /* 关键：画布上拖动＝调行、不是滚动页面。不给 touch-action:none，
+     WebView 会把触摸当平移/滚动，pointercancel 一打断拖动就废了 */
+  .page-holder canvas{touch-action:none}
+  .page-stack{touch-action:none}
+  /* 放大命中区，手指点得中 */
+  input[type=range]{height:30px}
+  input[type=range]::-webkit-slider-thumb{width:24px;height:24px}
+  .inkdot{width:30px;height:30px}
+  .paper-card .del{width:26px;height:26px;line-height:24px}
+  .sizerow .sz-tag{width:26px;height:26px}
+  .btn.sm{min-height:40px}
+  .btn{padding:11px 14px}
+  .frow .item{padding:9px 10px}
+  /* toast 贴边，长文案不越界 */
+  .toast{left:12px;right:12px;max-width:none;bottom:12px}
+  /* 顶栏/操作区留白收紧 */
+  .masthead{padding:8px 12px}
+  .bind{padding:16px 14px 32px}
+  .preview{padding:16px 12px 28px}
+  /* 刘海屏安全区 */
+  .masthead{padding-top:calc(8px + env(safe-area-inset-top))}
+  .toast{bottom:calc(12px + env(safe-area-inset-bottom))}
+}
