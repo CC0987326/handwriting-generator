@@ -184,8 +184,106 @@
     var b = $('#btnClearSel');
     if (b) b.textContent = selLines.length ? ('清空选择(' + selLines.length + ')') : '清空选择';
   }
-  // 拖动高频重绘：每 move 都全量重画会卡（每字要走离屏 getImageData 锐化）。
-  // 用 rAF 合并 + 「快速稿」渲染（跳过锐化/颗粒），松手再补一帧全质量。
+  // 预渲染缓存：每页「纸 + 每行字」的位图。拖动时每帧只做十几次 drawImage（几十上百字也满帧），
+  // 建缓存的代价一次性付掉。签名变化（换字体/纸/墨色/抖动…）才重建。
+  var pageCaches = [], lastCacheSig = '';
+  function cacheSig() {
+    var c = renderCfg();
+    return [lastLayout ? lastLayout.seed : '', previewDpi, c.familyCn, c.familyEn, c.inkColor,
+      c.inkJitter, c.inkPressure, c.inkTexture, c.bold, c.mistakeRate, c.messyRatio, c.charRandom,
+      c.weightCn, c.weightEn, c.pageNumber, c.customImage ? (c.customImage.width + 'x' + c.customImage.height) : ''
+    ].join('|');
+  }
+  function pageCache(pi) {
+    var sig = cacheSig();
+    if (sig !== lastCacheSig) { pageCaches = []; lastCacheSig = sig; }
+    if (!pageCaches[pi]) pageCaches[pi] = R.buildPageCache(lastLayout, pi, renderCfg(), previewDpi);
+    return pageCaches[pi];
+  }
+
+  /* ---------------- 撤回 / 重做（前后各 10 步） ----------------
+   * 快照只存「调整状态」：整篇偏移 textOffset + 各行偏移。锚点用 token 原始坐标(rawX/rawY)，
+   * 因为行重排后 line key 会变，原始坐标才稳。undo 栈任意时刻 ≤10、redo 栈 ≤10。 */
+  var undoStack = [], redoStack = [], UNDO_MAX = 10;
+  function snapAdj() {
+    var rows = [];
+    if (lastLayout) {
+      for (var p = 0; p < lastLayout.pages.length; p++) {
+        var toks = lastLayout.pages[p].tokens;
+        for (var i = 0; i < toks.length; i++) {
+          var t = toks[i];
+          if (t.offDx || t.offDy) rows.push([p, +(t.rawX || 0).toFixed(3), +(t.rawY || 0).toFixed(3), +(t.offDx || 0).toFixed(3), +(t.offDy || 0).toFixed(3)]);
+        }
+      }
+    }
+    return { off: { dx: (cfg.textOffset && cfg.textOffset.dx) || 0, dy: (cfg.textOffset && cfg.textOffset.dy) || 0 }, rows: rows };
+  }
+  function applyAdj(s) {
+    if (!lastLayout) return;
+    cfg.textOffset = { dx: s.off.dx, dy: s.off.dy };
+    for (var p = 0; p < lastLayout.pages.length; p++) {
+      var toks = lastLayout.pages[p].tokens;
+      for (var i = 0; i < toks.length; i++) { toks[i].offDx = 0; toks[i].offDy = 0; }
+    }
+    for (var r = 0; r < s.rows.length; r++) {
+      var row = s.rows[r], page = lastLayout.pages[row[0]];
+      if (!page) continue;
+      var toks2 = page.tokens, best = null, bestD = 1e9;
+      for (var j = 0; j < toks2.length; j++) {
+        var t = toks2[j];
+        var d = Math.abs(t.rawX - row[1]) + Math.abs(t.rawY - row[2]);
+        if (d < bestD) { bestD = d; best = t; }
+      }
+      if (best) { best.offDx = row[3]; best.offDy = row[4]; }
+    }
+    refreshCacheAfterAdj();
+  }
+  function pushUndo() {   // 在“将要改变位置”的操作之前调用
+    if (!lastLayout) return;
+    undoStack.push(snapAdj());
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    redoStack = [];
+    syncUndoUI();
+  }
+  // 拖动：只有真正移动了才把「按下时的快照」记一步（单击选中/取消 不记，避免空步挤掉历史）
+  function dragCommit(dg) {
+    if (!dg || dg.moved) return;
+    dg.moved = true;
+    undoStack.push(dg.snap);
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    redoStack = [];
+    syncUndoUI();
+  }
+  function applyAdjEdit(fn) { fn(); refreshCacheAfterAdj(); }   // 一次性调整（复位等）后重画
+  // 调整位置后：缓存里的「纸」不受影响（纸不含字），只需重画（缓存 blit 即可）
+  function refreshCacheAfterAdj() {
+    for (var i = 0; i < lastPages.length; i++) {
+      var cv = lastPages[i]; if (!cv) continue;
+      R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i));
+      drawLineHighlights(i);
+    }
+  }
+  function undo() {
+    if (!undoStack.length) { toast('没有可撤回的调整', 'err'); return; }
+    redoStack.push(snapAdj());
+    if (redoStack.length > UNDO_MAX) redoStack.shift();
+    applyAdj(undoStack.pop());
+    syncUndoUI();
+  }
+  function redo() {
+    if (!redoStack.length) { toast('没有可重做的调整', 'err'); return; }
+    undoStack.push(snapAdj());
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    applyAdj(redoStack.pop());
+    syncUndoUI();
+  }
+  function syncUndoUI() {
+    var u = $('#btnUndoAdj'), r = $('#btnRedoAdj');
+    if (u) { u.disabled = !undoStack.length; u.style.opacity = undoStack.length ? '' : '.4'; }
+    if (r) { r.disabled = !redoStack.length; r.style.opacity = redoStack.length ? '' : '.4'; }
+  }
+
+  // 拖动高频重绘：用缓存渲染（纸 blit 一次 + 每行 blit 一次），不再每帧重画全部字。
   var _dragRaf = 0, _dragPage = null;
   function queueDragRedraw(pi) {
     if (pi !== undefined) _dragPage = pi;
@@ -199,11 +297,11 @@
       for (var k = 0; k < n; k++) {
         var i = list ? list[k] : k;
         var cv = lastPages[i]; if (!cv) continue;
-        R.renderPage(cv, lastLayout, i, renderCfg(true), previewDpi);   // 快速稿，不叠行框
+        R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i));   // 缓存 blit，不叠行框
       }
     });
   }
-  function endDragRedraw() {   // 松手：补一帧全质量 + 行高亮
+  function endDragRedraw() {   // 松手：补一帧 + 行高亮
     if (_dragRaf) { cancelAnimationFrame(_dragRaf); _dragRaf = 0; }
     redrawAll();
   }
@@ -222,7 +320,7 @@
   function redrawPreview(pi) {
     var cv = lastPages[pi];
     if (!cv) return;
-    R.renderPage(cv, lastLayout, pi, renderCfg(), previewDpi);
+    R.renderWithCache(cv, lastLayout, pi, renderCfg(), previewDpi, pageCache(pi));   // 预览统一走缓存（快且与拖动一致）
     drawLineHighlights(pi);
   }
   function syncEditUI() {
@@ -257,6 +355,7 @@
     refreshSel();
   }
   function resetAdj() {
+    pushUndo();   // 复位也进历史，可撤回
     cfg.textOffset = { dx: 0, dy: 0 };
     if (lastLayout) {
       for (var p = 0; p < lastLayout.pages.length; p++) {
@@ -272,7 +371,7 @@
   function startSelDrag(pi, key, e, rect) {
     var page = lastLayout.pages[pi];
     var area = page.area || lastLayout.area;
-    dragging = { kind: 'sel', pi: pi, key: key, startX: e.clientX, startY: e.clientY, mmPerPx: area.pageW / rect.width, sx: {}, moved: false };
+    dragging = { kind: 'sel', pi: pi, key: key, startX: e.clientX, startY: e.clientY, mmPerPx: area.pageW / rect.width, sx: {}, moved: false, snap: snapAdj() };
     for (var j = 0; j < selLines.length; j++) {
       var L = findLine(lastLayout.pages[selLines[j].pi], selLines[j].key);
       if (!L) continue;
@@ -297,7 +396,8 @@
         dragging = {
           kind: 'block', pi: pi, startX: e.clientX, startY: e.clientY, mmPerPx: mmPerPx,
           baseDx: (cfg.textOffset && cfg.textOffset.dx) || 0,
-          baseDy: (cfg.textOffset && cfg.textOffset.dy) || 0
+          baseDy: (cfg.textOffset && cfg.textOffset.dy) || 0,
+          snap: snapAdj(), moved: false
         };
       } else {
         var key = hitLine(page, cx, cy, rect.width);
@@ -315,7 +415,7 @@
           var o = lineOffset(L);
           dragging = {
             kind: 'line', pi: pi, L: L, startX: e.clientX, startY: e.clientY, mmPerPx: mmPerPx,
-            baseDx: o.dx, baseDy: o.dy
+            baseDx: o.dx, baseDy: o.dy, snap: snapAdj(), moved: false
           };
         }
       }
@@ -331,13 +431,18 @@
         return;
       }
       if (!dragging || dragging.pi !== pi) return;
+      // 移动阈值：<3px 视作点击（用于选行），不触发位移、也不记历史
+      if (!dragging.moved) {
+        var mdx = e.clientX - dragging.startX, mdy = e.clientY - dragging.startY;
+        if (mdx * mdx + mdy * mdy < 9) return;
+      }
+      dragCommit(dragging);   // 首次真实移动才记一步
       var dx = dragging.baseDx + (e.clientX - dragging.startX) * dragging.mmPerPx;
       var dy = dragging.baseDy + (e.clientY - dragging.startY) * dragging.mmPerPx;
       if (dragging.kind === 'block') {
         cfg.textOffset = { dx: dx, dy: dy };
         queueDragRedraw();
       } else if (dragging.kind === 'sel') {
-        dragging.moved = true;
         for (var j = 0; j < selLines.length; j++) {
           var k = selLines[j].pi + ':' + selLines[j].key;
           var L = findLine(lastLayout.pages[selLines[j].pi], selLines[j].key);
@@ -751,6 +856,8 @@
       var fams = { cn: fontFamilyFor(fcn), en: fontFamilyFor(fen) };
       lastLayout = R.layout(text, p, collectOpts(), fams);
       lastPages = []; overlays = []; dragging = null; clearSel(); marquee = null;
+      pageCaches = []; lastCacheSig = '';   // 新布局：丢弃旧页缓存（避免同种子复用导致画错）
+      undoStack = []; redoStack = []; syncUndoUI();   // 新布局：清空撤回/重做历史
       box.innerHTML = '';
       var total = lastLayout.pages.length;
       $('#pg') && ($('#pg').style.width = '35%');
@@ -770,7 +877,7 @@
         var stack = document.createElement('div');
         stack.className = 'page-stack';
         var cv = document.createElement('canvas');
-        R.renderPage(cv, lastLayout, i, renderCfg(), previewDpi);
+        R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i));   // 预览统一走缓存
         lastPages.push(cv);
         stack.appendChild(cv);
         var ov = document.createElement('div');
@@ -1164,6 +1271,19 @@
     $('#btnModeBlock').onclick = function () { setDragMode('block'); };
     $('#btnClearSel').onclick = function () { clearSel(); refreshSel(); };
     $('#btnResetAdj').onclick = resetAdj;
+    $('#btnUndoAdj').onclick = undo;
+    $('#btnRedoAdj').onclick = redo;
+    // 快捷键：Ctrl+Z 撤回 / Ctrl+Y、Ctrl+Shift+Z 重做（微调模式下生效，不抢输入框）
+    document.addEventListener('keydown', function (e) {
+      if (!lineEdit || !lastLayout) return;
+      var tag = (e.target && e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      var mod = e.ctrlKey || e.metaKey; if (!mod) return;
+      var k = (e.key || '').toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+    });
+    syncUndoUI();
     $('#btnSeed').onclick = function () {
       cfg.seed = Math.random().toString(36).slice(2, 9);
       $('#seed').value = cfg.seed; doPreview();

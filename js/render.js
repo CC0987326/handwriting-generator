@@ -764,6 +764,140 @@
     }
   }
 
+  /* ================= 预渲染缓存（拖动性能） =================
+   * 逐行拖动时若每帧重绘「纸张 + 全部字」，几百字一帧要上百毫秒（实测 240 字 108ms）。
+   * 改为「纸一张 + 每行字一张」的位图缓存：建一次，之后每帧只做十几次 drawImage，
+   * 无论多少字都能满帧。字形内容（含随机抖动/涂改）在建缓存时定死，与实时渲染同种子同顺序，
+   * 所以「预览看到什么，导出就是什么」。
+   * ---------------------------------------------------------------- */
+
+  // 把一页的字按「行」聚合（与 app.js linesOfPage 同口径：line 未定义归到 'x'）
+  function tokensByLine(page) {
+    var lines = [];
+    for (var i = 0; i < page.tokens.length; i++) {
+      var t = page.tokens[i];
+      var k = (t.line === undefined ? 'x' : t.line);
+      var L = null;
+      for (var j = 0; j < lines.length; j++) if (lines[j].line === k) { L = lines[j]; break; }
+      if (!L) { L = { line: k, tokens: [] }; lines.push(L); }
+      L.tokens.push(t);
+    }
+    return lines;
+  }
+
+  // 只画「纸面」：底色 + 纹理照片 + 格子/横线 + 页边，不含任何字。返回一张 canvas。
+  function buildPaper(layoutRes, pageIdx, cfg, dpi) {
+    var page = layoutRes.pages[pageIdx];
+    var area = page.area;
+    var W = Math.round(mm2px(area.pageW, dpi)), H = Math.round(mm2px(area.pageH, dpi));
+    var cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    var ctx = cv.getContext('2d');
+    var rng = RNG.makeRng('page:' + layoutRes.seed + ':' + pageIdx);
+    if (page.paper.kind === 'custom' && cfg.customImage) {
+      var img = cfg.customImage;
+      var ir = img.width / img.height, cr = W / H, dw, dh, dx, dy;
+      if (ir > cr) { dh = H; dw = H * ir; dx = (W - dw) / 2; dy = 0; }
+      else { dw = W; dh = W / ir; dx = 0; dy = (H - dh) / 2; }
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(img, dx, dy, dw, dh);
+    } else {
+      paintPaper(ctx, page, dpi, rng);
+      if (page.kind === 'grid') drawGrid(ctx, page, dpi, rng);
+      else if (page.kind === 'line') drawLines(ctx, page, dpi, rng);
+      if (cfg.pageNumber !== false) drawMargin(ctx, page, dpi, pageIdx, layoutRes.pages.length);
+    }
+    return cv;
+  }
+
+  // 每行一张「透明小图」（尺寸裁到该行包围盒，减小每帧 blit 面积）。
+  // 行内每字按「零行偏移」绘制，故之后整行平移只需改 drawImage 的 dx/dy。
+  // 行级漂移(k)与逐字随机(rng)的消耗顺序与 renderPage 完全一致 → 与实时渲染逐像素相同。
+  function buildLineLayers(layoutRes, pageIdx, cfg, dpi) {
+    var page = layoutRes.pages[pageIdx];
+    var rng = RNG.makeRng('page:' + layoutRes.seed + ':' + pageIdx);
+    var drng = RNG.makeRng('drift:' + layoutRes.seed + ':' + pageIdx);
+    var messy = cfg.messyRatio / 100;
+    var lines = tokensByLine(page);
+    var layers = [];
+    for (var li = 0; li < lines.length; li++) {
+      var L = lines[li];
+      var ft = L.tokens[0];
+      // 行级漂移：口径同 renderPage（每行消耗一次 drng）
+      var d = {
+        dy: gauss(drng) * messy * (ft.size || 5) * 0.14,
+        dx: gauss(drng) * messy * (ft.size || 5) * 0.06,
+        scale: 1 + gauss(drng) * messy * 0.05,
+        alpha: 1 - Math.min(0.16, Math.abs(gauss(drng)) * messy * 0.05)
+      };
+      // 包围盒（mm）→ px；留足字形越界与涂改笔画的余量
+      var minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+      for (var q = 0; q < L.tokens.length; q++) {
+        var t = L.tokens[q], s = t.size || 8.3;
+        if (t.x - s * 1.4 < minX) minX = t.x - s * 1.4;
+        if (t.x + s * 1.4 > maxX) maxX = t.x + s * 1.4;
+        if (t.y - s * 1.5 < minY) minY = t.y - s * 1.5;
+        if (t.y + s * 1.0 > maxY) maxY = t.y + s * 1.0;
+      }
+      var padMm = 0.8;
+      var X0 = Math.floor(mm2px(minX - padMm, dpi));
+      var Y0 = Math.floor(mm2px(minY - padMm, dpi));
+      var X1 = Math.ceil(mm2px(maxX + padMm, dpi));
+      var Y1 = Math.ceil(mm2px(maxY + padMm, dpi));
+      var BW = Math.max(2, X1 - X0), BH = Math.max(2, Y1 - Y0);
+      var lc = document.createElement('canvas');
+      lc.width = BW; lc.height = BH;
+      var lctx = lc.getContext('2d');
+      lctx.translate(-X0, -Y0);   // 把绝对 px 坐标映射进本行小图
+      for (var ti = 0; ti < L.tokens.length; ti++) {
+        var tk = L.tokens[ti];
+        var sx0 = tk.ox || 0, sy0 = tk.oy || 0;
+        tk.ox = 0; tk.oy = 0;                       // 行内先按零偏移画（行偏移交给 blit）
+        drawToken(lctx, tk, dpi, cfg, rng, d);
+        tk.ox = sx0; tk.oy = sy0;                   // 还原 token
+      }
+      layers.push({ line: L.line, canvas: lc, x0: X0, y0: Y0 });
+    }
+    return layers;
+  }
+
+  // 一页的完整缓存：纸 + 各行小图
+  function buildPageCache(layoutRes, pageIdx, cfg, dpi) {
+    return { base: buildPaper(layoutRes, pageIdx, cfg, dpi), lines: buildLineLayers(layoutRes, pageIdx, cfg, dpi) };
+  }
+
+  // 用缓存渲染一页：纸 blit 一次 + 每行按「行偏移 + 整篇偏移」blit。
+  // 每帧只做「1 + 行数」次 drawImage，字数再多也快。offs 从 token 真值读，调用方无需传。
+  function renderWithCache(canvas, layoutRes, pageIdx, cfg, dpi, cache) {
+    if (!cache) return renderPage(canvas, layoutRes, pageIdx, cfg, dpi);
+    var page = layoutRes.pages[pageIdx];
+    var area = page.area;
+    var W = Math.round(mm2px(area.pageW, dpi)), H = Math.round(mm2px(area.pageH, dpi));
+    if (canvas.width !== W) canvas.width = W;
+    if (canvas.height !== H) canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(cache.base, 0, 0);
+    // 每行当前偏移（从 token 真值读，拖动时 app.js 已更新 offDx/offDy）
+    var off = {};
+    for (var i = 0; i < page.tokens.length; i++) {
+      var t = page.tokens[i];
+      var k = (t.line === undefined ? 'x' : t.line);
+      if (!off[k]) off[k] = { dx: t.offDx || 0, dy: t.offDy || 0 };
+    }
+    var gx = (cfg.textOffset && cfg.textOffset.dx) || 0;
+    var gy = (cfg.textOffset && cfg.textOffset.dy) || 0;
+    for (var j = 0; j < cache.lines.length; j++) {
+      var lay = cache.lines[j];
+      var o = off[lay.line] || { dx: 0, dy: 0 };
+      var px = lay.x0 + mm2px(o.dx + gx, dpi);   // 不取整：亚像素平移，拖动更顺滑
+      var py = lay.y0 + mm2px(o.dy + gy, dpi);
+      ctx.drawImage(lay.canvas, px, py);
+    }
+    return canvas;
+  }
+
   /* ================= 渲染整页 ================= */
   // 渲染第 pageIdx 页到给定 canvas（canvas 尺寸会被设定为 dpi 对应像素）
   function renderPage(canvas, layoutRes, pageIdx, cfg, dpi) {
@@ -915,6 +1049,17 @@
       cfg.familyCn = cfg.familyCn || currentFamilyCn || HW.render._lastFamilyCn;
       cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
       return renderPage(canvas, res, pageIdx, cfg, dpi);
+    },
+    // 预渲染缓存：建一次「纸 + 每行字」的位图，拖动时用 renderWithCache 每帧只 blit
+    buildPageCache: function (res, pageIdx, cfg, dpi) {
+      cfg.familyCn = cfg.familyCn || currentFamilyCn || HW.render._lastFamilyCn;
+      cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
+      return buildPageCache(res, pageIdx, cfg, dpi);
+    },
+    renderWithCache: function (canvas, res, pageIdx, cfg, dpi, cache) {
+      cfg.familyCn = cfg.familyCn || currentFamilyCn || HW.render._lastFamilyCn;
+      cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
+      return renderWithCache(canvas, res, pageIdx, cfg, dpi, cache);
     },
     pagePixelSize: function (paper, dpi) {
       var a = areaOf(paper, {});
