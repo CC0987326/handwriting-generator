@@ -62,8 +62,108 @@
     try { if (android && android.bootFail) android.bootFail(); } catch (e) { }
   });
 
+  /* ---------- 手机端内容折叠（手风琴）----------
+   * 窄屏时把 .bind 里每个 section.step 的标题变成可点击的折叠头，
+   * 默认全部收起，点标题展开；再点收起。桌面（>640px）不启用。 */
+  function injectAccordion() {
+    if (!android) return;
+    var steps = document.querySelectorAll('.bind > section.step');
+    Array.prototype.forEach.call(steps, function (sec) {
+      var h = sec.querySelector(':scope > .step-h');
+      if (!h || h._hwFold) return;
+      h._hwFold = true;
+      h.classList.add('collapsible');
+      // 默认收起；「生成预览」按钮不在 step 里，不受影响
+      sec.classList.add('collapsible-closed');
+      h.addEventListener('click', function () {
+        var closed = sec.classList.toggle('collapsible-closed');
+        h.classList.toggle('open', !closed);
+      });
+    });
+  }
+
+  /* ---------- 导出区挪到侧栏最末 + 折叠 ----------
+   * 手机上把「下载 PDF / 导出 PNG / 打印」从中间搬到侧栏最后，
+   * 做成默认收起的手风琴块，标题「导出 / 打印」。桌面不动。 */
+  function injectExportFold() {
+    if (!android) return;
+    var bind = document.querySelector('.bind');
+    var grid = document.querySelector('.actions .grid2');
+    var pdf = document.getElementById('btnPdf');
+    if (!bind || !grid) return;
+    var sec = document.createElement('section');
+    sec.className = 'step';
+    sec.style.marginTop = '14px';
+    var h = document.createElement('h2');
+    h.className = 'step-h collapsible open';
+    h.innerHTML = '<i class="n">✦</i>导出 / 打印';
+    var body = document.createElement('div');
+    body.style.marginTop = '8px';
+    if (pdf) body.appendChild(pdf);
+    body.appendChild(grid);
+    sec.appendChild(h);
+    sec.appendChild(body);
+    bind.appendChild(sec);
+    h.addEventListener('click', function () {
+      var closed = sec.classList.toggle('collapsible-closed');
+      h.classList.toggle('open', !closed);
+    });
+    setTimeout(function () { h.click(); }, 0);   // 初始收起
+  }
+
+  /* ---------- 顶栏折叠 ----------
+   * 顶部「手写作业生成器」一栏（徽章 + 统计信息）在手机上会遮挡内容，
+   * 加一个折叠按键，默认收起，点一下展开/收起；状态记进 localStorage。 */
+  function injectMastheadFold() {
+    if (!android) return;
+    var mh = document.querySelector('.masthead');
+    if (!mh || mh._hwFold) return;
+    mh._hwFold = true;
+    var btn = document.createElement('button');
+    btn.className = 'mast-fold';
+    btn.type = 'button';
+    btn.title = '折叠 / 展开顶部信息';
+    btn.setAttribute('aria-label', '折叠或展开顶部信息');
+    mh.insertBefore(btn, document.getElementById('btnTheme'));
+    function apply() {
+      var folded = true;   // 默认收起（挡内容）；用户展开过就记住
+      try { folded = localStorage.getItem('hw_mast_fold') !== '0'; } catch (e) { }
+      mh.classList.toggle('folded', folded);
+      btn.classList.toggle('open', !folded);
+    }
+    btn.addEventListener('click', function () {
+      var folded = mh.classList.toggle('folded');
+      try { localStorage.setItem('hw_mast_fold', folded ? '1' : '0'); } catch (e) { }
+      btn.classList.toggle('open', !folded);
+    });
+    apply();
+  }
+
+  /* ---------- 相机拍照：WebView 无视 <input capture>，必须走原生 ----------
+   * 点「📷 相机拍照」→ HWAndroid.takePhoto() 拉系统相机 →
+   * 原生回调 __hwCameraShot(dataURL) → 转 File 喂给 onCustomBg。 */
+  function wireCamera() {
+    if (!android || !android.takePhoto) return;
+    var btn = document.getElementById('btnCustomCam');
+    if (btn) {
+      btn.onclick = function () { android.takePhoto(); };
+    }
+    window.__hwCameraShot = function (dataUrl) {
+      // dataURL → File，走与相册上传完全相同的链路
+      var bin = atob(dataUrl.split(',')[1]);
+      var arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      var file = new File([arr], '相机拍照.jpg', { type: 'image/jpeg' });
+      if (typeof window.__hwOnCustomBg === 'function') window.__hwOnCustomBg(file);
+    };
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
+    setTimeout(wireCamera, 400);   // 等 app.js 绑完自定义纸张区
     setTimeout(injectShare, 0);
+    setTimeout(injectAccordion, 0);
+    setTimeout(injectExportFold, 0);
+    setTimeout(injectMastheadFold, 0);
     // 首屏逻辑跑通 → 告诉原生「本次启动成功」，撤销看门狗回滚标记
     setTimeout(function () { try { if (android && android.bootOk) android.bootOk(); } catch (e) { } }, 1200);
   });

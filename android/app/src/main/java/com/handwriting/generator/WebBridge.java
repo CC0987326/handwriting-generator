@@ -177,6 +177,17 @@ public class WebBridge {
         });
     }
 
+    /**
+     * 拉起系统相机实时拍照（自定义纸张用）。WebView 会无视 <input capture>，
+     * 必须原生 ACTION_IMAGE_CAPTURE。拍完经 onCameraResult 压成 JPEG base64 回传网页。
+     */
+    @JavascriptInterface
+    public void takePhoto() {
+        act.runOnUiThread(new Runnable() {
+            @Override public void run() { act.startCameraCapture(); }
+        });
+    }
+
     private void callback(String kind, boolean ok, String msg) {
         final String js = "window.__hwNativeCb && window.__hwNativeCb(" +
                 JSONObject.quote(kind) + "," + ok + "," + JSONObject.quote(msg == null ? "" : msg) + ")";

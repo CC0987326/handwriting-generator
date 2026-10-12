@@ -170,7 +170,7 @@
     trackEn: 0,             // 英文/数字逐字间距(mm)
     weightCn: 0,            // 中文笔画粗细（0 = 标准，0~60）
     weightEn: 0,            // 英文笔画粗细（0 = 标准，0~60）
-    lineSpacing: 1.55,      // 横线纸行距倍数
+    lineSpacing: 1,         // 横线纸行距倍数
     inkColor: '#0d0e12',    // 黑色中性笔真实墨色（比纯黑略暖、落地后不发灰）
     inkJitter: true,        // 逐字墨色/深浅自然变化
     inkPressure: 1,         // 落笔顿挫（起收笔深浅/粗细变化）0~2

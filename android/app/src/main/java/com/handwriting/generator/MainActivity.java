@@ -1,5 +1,6 @@
 package com.handwriting.generator;
 
+import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -15,7 +16,6 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.AppCompatActivity;
 import androidx.webkit.WebViewAssetLoader;
 
 import java.io.File;
@@ -25,12 +25,15 @@ import java.io.File;
  * 资源经 WebViewAssetLoader 走 https://appassets.androidplatform.net/，由 WebAssetRouter 决定
  * 从热更目录还是 APK 内置 assets 读取；同 origin 保证 localStorage 跨热更不丢。
  */
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends Activity {
 
     private static final String TAG = "HW-Main";
     private static final String HOST = "appassets.androidplatform.net";
     private static final String BASE_URL = "https://" + HOST + "/index.html";
     private static final int REQ_FILE = 1001;
+    private static final int REQ_CAMERA = 1002;
+
+    private Uri cameraOutUri;   // 当前拍照的输出目标（FileProvider URI）
 
     private WebView web;
     private WebViewAssetLoader loader;
@@ -111,6 +114,50 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> web.loadUrl(BASE_URL));
     }
 
+    /** 拉起系统相机实时拍照（WebBridge.takePhoto 调）。结果在 onActivityResult 回网页。 */
+    public void startCameraCapture() {
+        try {
+            File dir = new File(getFilesDir(), "cam");
+            if (!dir.exists()) dir.mkdirs();
+            File out = new File(dir, "shot_" + System.currentTimeMillis() + ".jpg");
+            cameraOutUri = androidx.core.content.FileProvider.getUriForFile(
+                    this, getPackageName() + ".fileprovider", out);
+            Intent i = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+            i.putExtra(android.provider.MediaStore.EXTRA_OUTPUT, cameraOutUri);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (i.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(i, REQ_CAMERA);
+            } else {
+                Log.w(TAG, "no camera app");
+                cameraOutUri = null;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "startCameraCapture failed", e);
+            cameraOutUri = null;
+        }
+    }
+
+    /** 拍照完成 → 读文件压 JPEG → base64 回传网页 onCustomBg。 */
+    private void deliverCameraShot() {
+        if (cameraOutUri == null) return;
+        try {
+            java.io.InputStream is = getContentResolver().openInputStream(cameraOutUri);
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+            is.close();
+            final String b64 = android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP);
+            final String js = "window.__hwCameraShot && window.__hwCameraShot(" +
+                    org.json.JSONObject.quote("data:image/jpeg;base64," + b64) + ")";
+            web.evaluateJavascript(js, null);
+        } catch (Exception e) {
+            Log.e(TAG, "deliverCameraShot failed", e);
+        } finally {
+            cameraOutUri = null;
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQ_FILE) {
@@ -119,6 +166,11 @@ public class MainActivity extends AppCompatActivity {
                         WebChromeClient.FileChooserParams.parseResult(resultCode, data));
                 filePathCallback = null;
             }
+            return;
+        }
+        if (requestCode == REQ_CAMERA) {
+            if (resultCode == RESULT_OK) deliverCameraShot();
+            else cameraOutUri = null;
             return;
         }
         super.onActivityResult(requestCode, resultCode, data);

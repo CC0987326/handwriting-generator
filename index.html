@@ -82,6 +82,10 @@
           <span class="dz-h">整页铺满；勾选「长期保存」可跨会话保留</span>
         </label>
         <input type="file" id="customBg" accept="image/*" hidden>
+        <input type="file" id="customBgCam" accept="image/*" capture="environment" hidden>
+        <div class="row" style="gap:8px;margin-top:8px">
+          <button class="btn sm" id="btnCustomCam" type="button" style="flex:1">📷 相机拍照</button>
+        </div>
         <input type="text" id="customBgName" placeholder="纸张名称（可留空）" style="margin-top:8px">
         <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--ink-2);margin-top:8px;cursor:pointer">
           <input type="checkbox" id="customBgPersist" style="width:auto"> 长期保存（关闭浏览器后仍在）

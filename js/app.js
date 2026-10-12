@@ -766,6 +766,53 @@
   }
 
   /* ---------------- 滑块 ---------------- */
+  // 给 type=range 滑块两端加「− / +」步进按钮：左减右加，每次 ±1（按 step 取整步）。
+  // 点击等价于把滑块值改一步并触发 input（回调逻辑复用各自的 oninput/onchange）。
+  function addSteppers(range) {
+    if (!range || range._hwStepped) return;
+    range._hwStepped = true;
+    var mk = function (label) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'stepbtn';
+      b.textContent = label;
+      b.setAttribute('tabindex', '-1');
+      return b;
+    };
+    var minus = mk('−'), plus = mk('+');
+    var step = function (dir) {
+      var st = parseFloat(range.step) || 1;
+      var v = parseFloat(range.value) + dir * st;
+      var min = range.min === '' ? -Infinity : parseFloat(range.min);
+      var max = range.max === '' ? Infinity : parseFloat(range.max);
+      // 浮点误差：按 step 的小数位四舍五入
+      var dec = (String(range.step).split('.')[1] || '').length;
+      v = +v.toFixed(dec);
+      if (v < min || v > max) return;
+      range.value = v;
+      range.dispatchEvent(new Event('input', { bubbles: true }));
+      range.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    minus.onclick = function () { step(-1); };
+    plus.onclick = function () { step(1); };
+    // 父容器不是 flex（如 .slider）时，包一层 row 再放按钮
+    var p = range.parentNode;
+    if (p && getComputedStyle(p).display !== 'flex') {
+      var row = document.createElement('div');
+      row.className = 'ste prow';
+      p.insertBefore(row, range);
+      row.appendChild(range);
+      row.appendChild(plus);
+      row.insertBefore(minus, range);
+    } else {
+      p.insertBefore(minus, range);
+      p.appendChild(plus);
+    }
+  }
+  function addAllSteppers() {
+    $$('input[type=range]').forEach(addSteppers);
+  }
+
   function bindSlider(id, key) {
     var el = $('#' + id), out = $('#' + id + 'Val');
     el.value = cfg[key];
@@ -1019,15 +1066,19 @@
     step();
   }
 
-  /* 打印：生成图片再用 img */
+  /* 打印：生成图片再用 img。Android 上 window.open 被拦/打印界面卡死，
+     改走原生桥：把页面图片临时写进打印容器 DOM 再调 HWAndroid.print()（打印主 WebView）。 */
   function doPrint2() {
     if (!lastLayout) { toast('请先生成预览', 'err'); return; }
     var dpi = 190, N = lastLayout.pages.length, area = lastLayout.area;
+    if (window.HWAndroid && window.HWAndroid.print) { androidPrint(N, area); return; }
     var w = window.open('', '_blank');
-    w.document.write('<!doctype html><meta charset="utf-8"><title>打印手写稿</title>');
+    w.document.write('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>打印手写稿</title>');
     w.document.write('<style>@page{size:' + area.pageW + 'mm ' + area.pageH + 'mm;margin:0}' +
-      'html,body{margin:0;padding:0}img{display:block;width:100%;page-break-after:always}</style>');
-    w.document.write('<body>');
+      'html,body{margin:0;padding:0}img{display:block;width:100%;page-break-after:always}' +
+      '#bk{position:fixed;top:10px;right:10px;z-index:9;padding:10px 18px;font-size:15px;' +
+      'background:#c0392b;color:#fff;border:none;border-radius:6px;cursor:pointer}@media print{#bk{display:none}}</style>');
+    w.document.write('<body><button id="bk" onclick="window.close()">← 返回</button>');
     for (var i = 0; i < N; i++) {
       var cv = document.createElement('canvas');
       R.renderPage(cv, lastLayout, i, renderCfg(), dpi);
@@ -1037,6 +1088,34 @@
     w.document.write('</body>');
     w.document.close();
     setTimeout(function () { try { w.focus(); w.print(); } catch (e) { } }, 700);
+  }
+
+  /* Android 打印：把每页渲染成 <img> 塞进一个全屏打印容器，再调原生 PrintManager 打印主 WebView。
+     打完/取消后自动移除容器。系统打印界面自带「取消」，不会卡死。 */
+  function androidPrint(N, area) {
+    var box = document.createElement('div');
+    box.id = 'hwPrintBox';
+    box.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:9999;overflow:auto;padding:0';
+    box.innerHTML = '<style>@page{size:' + area.pageW + 'mm ' + area.pageH + 'mm;margin:0}' +
+      '#hwPrintBox img{display:block;width:100%;page-break-after:always}</style>';
+    var dpi = 190;
+    for (var i = 0; i < N; i++) {
+      var cv = document.createElement('canvas');
+      R.renderPage(cv, lastLayout, i, renderCfg(), dpi);
+      var im = new Image();
+      im.src = cv.toDataURL('image/png');
+      box.appendChild(im);
+      cv.width = cv.height = 0;
+    }
+    document.body.appendChild(box);
+    setTimeout(function () {
+      try { window.HWAndroid.print(); } catch (e) { }
+      // 打印界面关闭后收掉容器（PrintManager 是模态的，回来时页面已恢复）
+      setTimeout(function () {
+        var b = document.getElementById('hwPrintBox');
+        if (b && b.parentNode) b.parentNode.removeChild(b);
+      }, 3000);
+    }, 400);
   }
 
   /* ---------------- 载入本地字体文件 ----------------
@@ -1124,6 +1203,7 @@
       if (lastLayout) doPreview();
     });
   }
+  window.__hwOnCustomBg = onCustomBg;   // 手机端原生拍照回传用（mobile.js 调）
 
   // 启动时把长期保存的上传纸张解码回来
   function restoreUploadedPapers() {
@@ -1250,6 +1330,7 @@
     $('#trackEn').value = cfg.trackEn || 0; $('#trackEnVal').textContent = (+(cfg.trackEn || 0)).toFixed(2);
     $('#inkPressure').value = (cfg.inkPressure === undefined ? 1 : cfg.inkPressure); $('#inkPressureVal').textContent = (+$('#inkPressure').value).toFixed(1);
     $('#inkTexture').value = (cfg.inkTexture === undefined ? 0.4 : cfg.inkTexture); $('#inkTextureVal').textContent = (+$('#inkTexture').value).toFixed(2);
+    addAllSteppers();
     var cp = curPaper();
     var showUpload = cp.kind === 'custom' || cp.uploaded;
     $('#customBgRow').style.display = showUpload ? 'block' : 'none';
@@ -1306,6 +1387,8 @@
     $('#fontSearch').oninput = buildFontCombo;
     $('#fontSearchEn').oninput = buildFontCombo;
     $('#customBg').onchange = function () { onCustomBg(this.files[0]); this.value = ''; };
+    $('#btnCustomCam').onclick = function () { $('#customBgCam').click(); };
+    $('#customBgCam').onchange = function () { onCustomBg(this.files[0]); this.value = ''; };
     // 「更多纸张」折叠
     $('#paperMoreBtn').onclick = function () { moreOpen = !moreOpen; buildPaperList(); };
     // 上传区：点击 + 拖放

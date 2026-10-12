@@ -183,6 +183,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
   background:var(--verm);border:2px solid var(--paper);box-shadow:0 0 0 1px var(--verm);cursor:pointer}
 input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--verm);border:2px solid var(--paper);box-shadow:0 0 0 1px var(--verm);cursor:pointer}
 .slider .ends{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-3);margin-top:4px}
+/* 滑块两端的 −/+ 步进按钮：左减右加，每次 ±1 */
+.stepbtn{flex:none;width:26px;height:26px;padding:0;line-height:1;font-size:15px;font-weight:700;
+  color:var(--ink-2);background:var(--paper);border:1px solid var(--hair-2);border-radius:0;cursor:pointer;
+  user-select:none;-webkit-user-select:none;touch-action:manipulation}
+.stepbtn:hover{color:var(--verm);border-color:var(--verm)}
+.stepbtn:active{background:var(--verm);color:#fff}
+.ste.prow{display:flex;align-items:center;gap:8px}
+/* 包裹后原 .slider 的 .top 与 .ends 还在 .slider 下，轨道行间距微调 */
+.slider .ste.prow{margin:6px 0}
 
 /* 字体列表 */
 .frow .search{margin-bottom:7px}
@@ -315,16 +324,21 @@ body.line-edit .page-holder canvas{cursor:grab}
   .deskbar{flex-wrap:wrap;gap:8px}
   .deskbar .spacer{flex-basis:100%;height:0}
   .deskbar .modes{flex-wrap:wrap;gap:8px}
-  /* 关键：画布上拖动＝调行、不是滚动页面。不给 touch-action:none，
-     WebView 会把触摸当平移/滚动，pointercancel 一打断拖动就废了 */
-  .page-holder canvas{touch-action:none}
-  .page-stack{touch-action:none}
-  /* 放大命中区，手指点得中 */
-  input[type=range]{height:30px}
-  input[type=range]::-webkit-slider-thumb{width:24px;height:24px}
+  /* 关键：只有在「逐行微调」模式下，画布上拖动＝调行、不是滚动页面
+     （不给 touch-action:none，WebView 会把触摸当平移/滚动，
+     pointercancel 一打断拖动就废了）。平时手指在纸上照常划屏翻页 */
+  body.line-edit .page-holder canvas{touch-action:none}
+  body.line-edit .page-stack{touch-action:none}
+  /* 放大命中区，手指点得中。
+     防误触：滑块轨道在手机上不响应触摸（pointer-events:none），
+     只有按住红色滑钮（thumb）或 −/+ 按钮才能调参，划屏碰到轨道不再误改数值 */
+  input[type=range]{height:30px;pointer-events:none;touch-action:none}
+  input[type=range]::-webkit-slider-thumb{width:24px;height:24px;pointer-events:auto}
+  input[type=range]::-moz-range-thumb{pointer-events:auto}
   .inkdot{width:30px;height:30px}
   .paper-card .del{width:26px;height:26px;line-height:24px}
   .sizerow .sz-tag{width:26px;height:26px}
+  .stepbtn{width:34px;height:34px;font-size:17px}
   .btn.sm{min-height:40px}
   .btn{padding:11px 14px}
   .frow .item{padding:9px 10px}
@@ -337,4 +351,46 @@ body.line-edit .page-holder canvas{cursor:grab}
   /* 刘海屏安全区 */
   .masthead{padding-top:calc(8px + env(safe-area-inset-top))}
   .toast{bottom:calc(12px + env(safe-area-inset-bottom))}
+}
+
+/* ---------- 手机端内容折叠（手风琴）：mobile.js 给 .bind>section.step 加 .collapsible，
+   点标题栏收/放。桌面不受影响（.collapsible 只在 <=640px 生效样式里出现）。 ---------- */
+.step-h.collapsible{position:relative;cursor:pointer;padding-right:30px;user-select:none;-webkit-user-select:none}
+.step-h.collapsible::after{
+  content:'';position:absolute;right:6px;top:50%;width:9px;height:9px;margin-top:-8px;
+  border-right:2px solid var(--ink-3);border-bottom:2px solid var(--ink-3);
+  transform:rotate(45deg);transition:transform .18s ease;
+}
+.step-h.collapsible.open::after{transform:rotate(-135deg);margin-top:-4px}
+
+/* ---------- 手机端顶栏折叠：mobile.js 注入 .mast-fold 按钮，
+   点一下收起徽章 + 统计信息，只留标题行。桌面不受影响。 ---------- */
+@media (max-width:640px){
+  .masthead .badge,.masthead .stat{display:none}
+  .masthead.folded .badge,.masthead.folded .stat{display:none}
+  .masthead:not(.folded) .badge,.masthead:not(.folded) .stat{display:inline-block}
+  /* 主题按钮 + 折叠按钮钉在右上角：absolute 定位在顶栏内，不随徽章/统计换行移动 */
+  .masthead .theme-btn,.masthead .mast-fold{
+    position:absolute;right:12px;top:50%;transform:translateY(-50%);
+  }
+  .masthead .mast-fold{right:12px}
+  .masthead .theme-btn{right:50px}
+  .masthead .spacer{display:none}
+  .mast-fold{
+    flex:none;width:30px;height:30px;margin-left:4px;padding:0;
+    position:relative;background:transparent;border:1px solid var(--hair-2);
+    border-radius:0;cursor:pointer;
+  }
+  .mast-fold::after{
+    content:'';position:absolute;left:50%;top:50%;width:9px;height:9px;
+    margin:-8px 0 0 -6px;border-right:2px solid var(--ink-3);
+    border-bottom:2px solid var(--ink-3);
+    transform:rotate(45deg);transition:transform .18s ease;
+  }
+  .mast-fold.open::after{transform:rotate(-135deg);margin:-4px 0 0 -6px}
+}
+.step.collapsible-closed .body, /* 无 .body 包裹的 section 直接藏标题后的兄弟节点 */
+section.step.collapsible-closed > *:not(.step-h){display:none}
+@media (max-width:640px){
+  .step-h.collapsible{padding-right:30px}
 }
