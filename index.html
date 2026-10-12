@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>手写作业生成器 · 本地版</title>
+<link rel="stylesheet" href="css/paper.css">
+<script>
+/* 尽早定主题，避免刷新时先亮后暗的闪动 */
+(function () {
+  try {
+    var t = localStorage.getItem('hw_theme') || 'light';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { }
+})();
+</script>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="brand"><span class="seal">写</span>手写作业生成器</div>
+  <span class="badge">本地版 · 免卡密 · 非商业</span>
+  <div class="spacer"></div>
+  <span class="stat" id="stat">准备就绪</span>
+  <button class="theme-btn" id="btnTheme" type="button" title="切换暗夜 / 白天模式" aria-label="切换暗夜模式" aria-pressed="false">
+    <svg class="ic-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg>
+    <svg class="ic-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.4"/><path d="M12 1.6v2.6M12 19.8v2.6M22.4 12h-2.6M4.2 12H1.6M19.4 4.6l-1.9 1.9M6.5 17.5l-1.9 1.9M19.4 19.4l-1.9-1.9M6.5 6.5 4.6 4.6"/></svg>
+    <span id="btnThemeLbl">暗夜</span>
+  </button>
+</header>
+
+<div class="wrap">
+  <!-- ================= 装订边：输入 ================= -->
+  <aside class="bind">
+
+    <section class="step">
+      <h2 class="step-h"><i class="n">一</i>文字内容</h2>
+      <textarea id="text" placeholder="把要写成手写的文字粘在这里。也可以从下面的 Word / 图片导入。"></textarea>
+      <div class="row" style="margin-top:9px;flex-wrap:wrap">
+        <button class="btn sm" id="btnLoadWord">导入 Word</button>
+        <button class="btn sm" id="btnLoadImg">导入图片 · OCR</button>
+        <button class="btn sm" id="btnSave">存草稿</button>
+        <button class="btn sm" id="btnLoad">载草稿</button>
+        <input type="file" id="fileWord" accept=".docx,.doc,.txt" hidden>
+        <input type="file" id="fileImg" accept="image/*" hidden>
+      </div>
+    </section>
+
+    <section class="step">
+      <h2 class="step-h"><i class="n">二</i>字体<span class="mono" id="fontLoadInfo"></span></h2>
+      <div class="frow">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:6px">
+          <span class="ftag cn">中文</span>
+          <input type="text" class="search" id="fontSearch" placeholder="搜索中文字体…">
+        </div>
+        <div class="list" id="fontList"></div>
+        <div style="display:flex;align-items:center;gap:7px;margin:12px 0 6px">
+          <span class="ftag en">英文</span>
+          <input type="text" class="search" id="fontSearchEn" placeholder="搜索英文字体…">
+        </div>
+        <div class="list" id="fontListEn"></div>
+      </div>
+      <div style="margin-top:9px">
+        <button class="btn sm" id="btnLoadFont" style="width:100%">载入本地字体（.ttf / .otf）</button>
+        <input type="file" id="fileFont" accept=".ttf,.otf,.woff,.woff2" multiple hidden>
+      </div>
+    </section>
+
+    <section class="step">
+      <h2 class="step-h"><i class="n">三</i>纸张背景</h2>
+      <div class="papers" id="paperList"></div>
+      <button class="btn sm more-toggle" id="paperMoreBtn" type="button" aria-expanded="false">
+        <span class="more-caret" aria-hidden="true"></span>更多纸张<span class="more-n" id="paperMoreN"></span>
+      </button>
+      <div class="papers" id="paperListMore" hidden></div>
+
+      <div class="paper-sect-h">自定义纸张</div>
+      <div class="papers" id="customPaperList"></div>
+      <div id="customBgRow" style="display:none;margin-top:11px">
+        <label for="customBg" class="drop-zone" id="customBgDrop">
+          <span class="dz-t">点击或把图片拖到这里</span>
+          <span class="dz-h">整页铺满；勾选「长期保存」可跨会话保留</span>
+        </label>
+        <input type="file" id="customBg" accept="image/*" hidden>
+        <input type="text" id="customBgName" placeholder="纸张名称（可留空）" style="margin-top:8px">
+        <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--ink-2);margin-top:8px;cursor:pointer">
+          <input type="checkbox" id="customBgPersist" style="width:auto"> 长期保存（关闭浏览器后仍在）
+        </label>
+      </div>
+    </section>
+
+    <!-- 附录页：调参台（默认收起） -->
+    <details class="adv">
+      <summary>高级设置</summary>
+      <div class="body">
+
+        <div class="slider">
+          <div class="top"><span>随机勾画涂改概率</span><b id="mistake-ratioVal">0</b></div>
+          <input type="range" id="mistake-ratio" min="0" max="100" step="1">
+          <div class="ends"><span>0 · 干净（默认）</span><span></span><span>100 · 涂改连篇</span></div>
+        </div>
+
+        <div class="slider">
+          <div class="top"><span>文字位置凌乱度</span><b id="messy-ratioVal">10</b></div>
+          <input type="range" id="messy-ratio" min="0" max="100" step="1">
+          <div class="ends"><span>0 · 整齐</span><span>推荐 10</span><span>100 · 凌乱</span></div>
+        </div>
+
+        <div class="slider">
+          <div class="top"><span>字体笔画凌乱度</span><b id="char-randomVal">5</b></div>
+          <input type="range" id="char-random" min="0" max="100" step="1">
+          <div class="ends"><span>0 · 工整</span><span>推荐 5</span><span>100 · 歪斜</span></div>
+        </div>
+
+        <div class="grp" style="margin-top:14px">
+          <label class="lbl">墨水（真实笔色）</label>
+          <div class="row" style="align-items:center;gap:9px;flex-wrap:wrap">
+            <span class="inkdot" data-c="#14161b" style="background:#14161b" title="黑色中性笔"></span>
+            <span class="inkdot" data-c="#17203f" style="background:#17203f" title="蓝黑墨水"></span>
+            <span class="inkdot" data-c="#1c3a92" style="background:#1c3a92" title="蓝色圆珠笔 / 直液笔"></span>
+            <span class="inkdot" data-c="#3a3d44" style="background:#3a3d44" title="铅笔 (HB)"></span>
+            <span class="inkdot" data-c="#96121a" style="background:#96121a" title="红色批改笔"></span>
+            <input type="color" id="inkColor" value="#14161b">
+          </div>
+          <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);margin-top:9px">
+            <input type="checkbox" id="inkJitter" checked> 墨色逐字深浅微变（只改笔画轻重，不偏色）
+          </label>
+          <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);margin-top:6px">
+            <input type="checkbox" id="bold"> 加粗
+          </label>
+          <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);margin-top:6px">
+            <input type="checkbox" id="pageNumber"> 页边印页码（默认关，保持纸张原貌）
+          </label>
+        </div>
+
+        <div class="grp">
+          <label class="lbl">墨迹写实 · 顿挫 / 质感（黑字更接近实拍）</label>
+          <div class="slider">
+            <div class="top"><span>落笔顿挫（起收笔力度）</span><b id="inkPressureVal">1.0</b></div>
+            <input type="range" id="inkPressure" min="0" max="2" step="0.1" value="1">
+            <div class="ends"><span>0 · 均匀</span><span>推荐 1</span><span>2 · 顿挫强</span></div>
+          </div>
+          <div class="slider">
+            <div class="top"><span>墨迹颗粒质感</span><b id="inkTextureVal">0.4</b></div>
+            <input type="range" id="inkTexture" min="0" max="1" step="0.05" value="0.4">
+            <div class="ends"><span>0 · 纯净</span><span>推荐 0.4</span><span>1 · 颗粒重</span></div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <label class="lbl">导出清晰度</label>
+          <select id="dpi">
+            <option value="150">150 dpi · 快</option>
+            <option value="300" selected>300 dpi · 推荐</option>
+            <option value="600">600 dpi · 超清（慢）</option>
+          </select>
+        </div>
+
+        <div class="grp">
+          <label class="lbl">字号（mm，0 = 按纸张自动）</label>
+          <input type="number" id="fontSize" value="0" min="0" max="30" step="0.5">
+        </div>
+
+        <div class="grp">
+          <label class="lbl">行距倍数（横线 / 空白纸生效）</label>
+          <input type="number" id="lineSpacing" value="1" min="0.8" max="3" step="0.05">
+        </div>
+
+        <div class="grp">
+          <label class="lbl">字号微调 · 中文 / 英文各自可调</label>
+          <div class="sizerow">
+            <span class="sz-tag cn">中</span>
+            <input type="range" id="sizeCn" min="0.6" max="1.6" step="0.02" value="1">
+            <b id="sizeCnVal" class="sz-val">1.00×</b>
+          </div>
+          <div class="sizerow">
+            <span class="sz-tag en">英</span>
+            <input type="range" id="sizeEn" min="0.6" max="1.6" step="0.02" value="1">
+            <b id="sizeEnVal" class="sz-val">1.00×</b>
+          </div>
+          <button class="btn sm" id="btnSizeReset" type="button" style="width:100%;margin-top:6px">中英字号复位</button>
+        </div>
+
+        <div class="grp">
+          <label class="lbl">字间距 · 中文 / 英文各自可调</label>
+          <div class="sizerow">
+            <span class="sz-tag cn">中</span>
+            <input type="range" id="trackCn" min="-1.5" max="3" step="0.05" value="0">
+            <b id="trackCnVal" class="sz-val">0.00</b>
+          </div>
+          <div class="sizerow">
+            <span class="sz-tag en">英</span>
+            <input type="range" id="trackEn" min="-1.5" max="3" step="0.05" value="0">
+            <b id="trackEnVal" class="sz-val">0.00</b>
+          </div>
+          <button class="btn sm" id="btnTrackReset" type="button" style="width:100%;margin-top:6px">中英字间距复位</button>
+        </div>
+
+        <div class="grp">
+          <label class="lbl">笔画粗细 · 中文 / 英文各自可调</label>
+          <div class="sizerow">
+            <span class="sz-tag cn">中</span>
+            <input type="range" id="weightCn" min="-5" max="20" step="1" value="0">
+            <b id="weightCnVal" class="sz-val">标准</b>
+          </div>
+          <div class="sizerow">
+            <span class="sz-tag en">英</span>
+            <input type="range" id="weightEn" min="-5" max="20" step="1" value="0">
+            <b id="weightEnVal" class="sz-val">标准</b>
+          </div>
+          <button class="btn sm" id="btnWeightReset" type="button" style="width:100%;margin-top:6px">中英粗细复位</button>
+        </div>
+
+        <div class="grp" style="margin-bottom:4px">
+          <label class="lbl">随机种子（留空 = 每次不同）</label>
+          <div class="row">
+            <input type="text" id="seed" placeholder="例如 abc123">
+            <button class="btn sm" id="btnSeed" title="换一个种子">换</button>
+          </div>
+        </div>
+
+      </div>
+    </details>
+
+    <!-- 主操作 + 导出 -->
+    <div class="actions">
+      <button class="btn primary" id="btnPreview" style="width:100%;padding:13px;font-size:15px">生成预览</button>
+      <button class="btn good" id="btnPdf" style="width:100%">下载 PDF · 高清</button>
+      <div class="grid2">
+        <button class="btn" id="btnPngAll">导出全部 PNG</button>
+        <button class="btn" id="btnPngOne">导出第 1 页</button>
+        <button class="btn" id="btnPrint" style="grid-column:1 / -1">打印</button>
+      </div>
+    </div>
+
+    <p style="color:var(--ink-3);font-size:12px;margin-top:16px;line-height:1.7">
+      纯本地运行，文字不上传任何服务器，断网也能用。内置手写字体与实拍纸张，任意选用。
+    </p>
+  </aside>
+
+  <!-- ================= 纸面：预览 ================= -->
+  <main class="desk">
+    <div class="deskbar">
+      <span class="t">预览</span>
+      <span class="hint">预览为压缩图，导出为高清无水印</span>
+      <div class="spacer"></div>
+      <button class="btn sm" id="btnLineEdit" type="button" aria-pressed="false" title="微调：拖动文字对齐横线">逐行微调</button>
+      <span class="modes" id="modeLineEdit" style="display:none">
+        <button class="btn sm" id="btnModeLine" type="button" title="拖动单行；点一下框可多选，多选后一起拖">逐行</button>
+        <button class="btn sm" id="btnModeBlock" type="button" title="拖动整篇">整篇</button>
+        <button class="btn sm" id="btnClearSel" type="button" title="取消多选（不影响已调位置）">清空选择</button>
+        <button class="btn sm" id="btnResetAdj" type="button" title="清除所有微调">复位</button>
+      </span>
+      <span id="previewMeta">未生成</span>
+    </div>
+    <div class="preview" id="preview">
+      <div class="empty">
+        <div class="big">写</div>
+        <div class="hint">在左边输入文字，选好字体和纸张，点<b>「生成预览」</b><br>这里就会出现以假乱真的手写稿。</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="js/catalog.js"></script>
+<script src="js/textures.js"></script>
+<script src="js/render.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

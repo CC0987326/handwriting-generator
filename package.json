@@ -1,0 +1,76 @@
+{
+  "name": "handwriting-generator",
+  "productName": "手写作业生成器",
+  "version": "1.0.0",
+  "description": "把一段文字排成一页以假乱真的中国作业本手写稿，完全本地运行",
+  "author": "手写作业生成器",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable",
+    "dist:nsis": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.local.handwriting.generator",
+    "productName": "手写作业生成器",
+    "copyright": "本地运行 · 不上传任何数据",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "index.html",
+      "css/**/*",
+      "js/**/*",
+      "fonts/**/*",
+      "assets/**/*",
+      "papers/**/*",
+      "samples/**/*",
+      "!**/*.md",
+      "!**/_*cap.html"
+    ],
+    "asar": true,
+    "compression": "normal",
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "手写作业生成器-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "手写作业生成器-${version}-便携版.${ext}",
+      "requestExecutionLevel": "user"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "手写作业生成器",
+      "artifactName": "手写作业生成器-${version}-安装版.${ext}",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  }
+}
