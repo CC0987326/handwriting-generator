@@ -213,6 +213,8 @@ namespace HandwritingApp
         private CoreWebView2Environment _env;
         private readonly string _userData;
         private readonly string _indexUrl;
+        private string _savePath;   // 本次导出：单文件的目标路径
+        private string _saveDir;    // 本次导出：多文件的目标文件夹
 
         public MainForm(string indexPath, string payloadDir)
         {
@@ -285,6 +287,10 @@ namespace HandwritingApp
                 finally { deferral.Complete(); }
             };
 
+            // 导出落盘：页面把 PNG/PDF 通过 postMessage 交过来，这里弹原生对话框写盘，
+            // 不再走浏览器下载通道（也就没有「下载多个文件」的拦截）。
+            core.WebMessageReceived += (s, e) => HandleWebMessage(core, e);
+
             core.DownloadStarting += (s, e) =>
             {
                 try
@@ -296,6 +302,90 @@ namespace HandwritingApp
                 }
                 catch (Exception) { }
             };
+        }
+
+        // 处理页面的原生保存请求（协议见 js/native.js）
+        private void HandleWebMessage(CoreWebView2 core, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            // 只接受本地页面（file://）发来的保存请求
+            string src = null;
+            try { src = e.Source; } catch (Exception) { }
+            if (string.IsNullOrEmpty(src) ||
+                src.IndexOf("file://", StringComparison.OrdinalIgnoreCase) != 0) return;
+
+            string line = null;
+            try { line = e.TryGetWebMessageAsString(); } catch (Exception) { }
+            if (string.IsNullOrEmpty(line)) return;
+            var f = line.Split('\t');
+            if (f.Length < 2) return;
+            string type = f[0], id = f[1];
+
+            try
+            {
+                if (type == "p")                       // 选目标：1 张 → 另存为；多张 → 选文件夹
+                {
+                    int count = 0; int.TryParse(f.Length > 2 ? f[2] : "1", out count);
+                    string first = f.Length > 3 ? f[3] : "手写稿.png";
+                    bool ok = false; string label = "";
+                    if (count > 1)
+                    {
+                        using (var dlg = new FolderBrowserDialog())
+                        {
+                            dlg.Description = "选择保存位置（本次导出的 " + count + " 个文件都存这里）";
+                            if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.SelectedPath))
+                            { _saveDir = dlg.SelectedPath; _savePath = null; ok = true; label = dlg.SelectedPath; }
+                        }
+                    }
+                    else
+                    {
+                        using (var dlg = new SaveFileDialog())
+                        {
+                            dlg.Title = "保存文件";
+                            dlg.FileName = SafeName(first);
+                            dlg.Filter = FilterFor(first);
+                            dlg.OverwritePrompt = true;
+                            if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.FileName))
+                            { _savePath = dlg.FileName; _saveDir = null; ok = true; label = dlg.FileName; }
+                        }
+                    }
+                    Reply(core, ok ? ("ok\t" + id + "\t" + label) : ("no\t" + id));
+                }
+                else if (type == "w")                  // 写一个文件：w \t id \t 文件名 \t base64
+                {
+                    if (f.Length < 4) { Reply(core, "err\t" + id + "\t缺少内容"); return; }
+                    string name = SafeName(f[2]);
+                    string target = (_savePath != null) ? _savePath : Path.Combine(_saveDir, name);
+                    byte[] bytes = Convert.FromBase64String(f[3]);
+                    File.WriteAllBytes(target, bytes);
+                    Reply(core, "ok\t" + id + "\t" + target);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { Reply(core, "err\t" + id + "\t" + ex.Message.Replace('\t', ' ')); } catch (Exception) { }
+            }
+        }
+
+        private void Reply(CoreWebView2 core, string msg)
+        {
+            try { core.PostWebMessageAsString(msg); } catch (Exception) { }
+        }
+
+        private static string SafeName(string n)
+        {
+            if (string.IsNullOrEmpty(n)) return "手写稿.png";
+            foreach (var c in Path.GetInvalidFileNameChars()) n = n.Replace(c, '_');
+            // 只取文件名，去掉可能带进来的路径
+            n = Path.GetFileName(n);
+            return string.IsNullOrEmpty(n) ? "手写稿.png" : n;
+        }
+
+        private static string FilterFor(string name)
+        {
+            string ext = (Path.GetExtension(name) ?? "").TrimStart('.').ToLowerInvariant();
+            if (ext == "pdf") return "PDF 文件 (*.pdf)|*.pdf|所有文件 (*.*)|*.*";
+            if (ext == "jpg" || ext == "jpeg") return "JPEG 图片 (*.jpg)|*.jpg|所有文件 (*.*)|*.*";
+            return "PNG 图片 (*.png)|*.png|所有文件 (*.*)|*.*";
         }
     }
 }

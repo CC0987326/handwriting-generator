@@ -5,6 +5,7 @@
  * ============================================================ */
 const { app, BrowserWindow, shell, Menu, dialog, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 // 预览要读本地 file:// 图片、canvas 要能解码，关掉同源限制
 app.commandLine.appendSwitch('allow-file-access-from-files');
@@ -13,6 +14,9 @@ app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 
 let win = null;
+
+// 每次导出的落盘目标（一次导出开始时设定，写文件时用）
+let saveTarget = null;   // { kind:'file', path } | { kind:'dir', dir }
 
 function createWindow() {
   win = new BrowserWindow({
@@ -28,6 +32,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js'),
       spellcheck: false,
       // 允许 file:// 页面把 canvas 导出成 PNG/PDF（toDataURL / toBlob 需要）
       webSecurity: false
@@ -99,7 +104,58 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
 }
 
+// ============================================================
+// 导出落盘：渲染层选路径 + 写文件，都走这里
+// 单张 → 系统「另存为」；多张 → 系统「选择文件夹」。
+// 绕开浏览器/WebView2 的「下载多个文件」权限拦截，且路径由用户定。
+// ============================================================
+function registerSaveIpc() {
+  const extOf = (n) => (String(n).split('.').pop() || 'png').toLowerCase();
+  const filtersOf = (name) => {
+    const ext = extOf(name);
+    if (ext === 'pdf') return [{ name: 'PDF 文件', extensions: ['pdf'] }];
+    if (ext === 'jpg' || ext === 'jpeg') return [{ name: 'JPEG 图片', extensions: ['jpg', 'jpeg'] }];
+    return [{ name: 'PNG 图片', extensions: ['png'] }];
+  };
+
+  ipcMain.handle('hw:beginSave', async (e, count, firstName) => {
+    const parent = BrowserWindow.fromWebContents(e.sender) || win;
+    if (count > 1) {
+      const r = await dialog.showOpenDialog(parent, {
+        title: '选择保存位置（本次导出的 ' + count + ' 个文件都存这里）',
+        buttonLabel: '保存到此文件夹',
+        properties: ['openDirectory', 'createDirectory']
+      });
+      if (r.canceled || !r.filePaths[0]) return { ok: false };
+      saveTarget = { kind: 'dir', dir: r.filePaths[0] };
+      return { ok: true, label: r.filePaths[0] };
+    }
+    const base = path.basename(String(firstName || 'handwriting.png'));
+    const r = await dialog.showSaveDialog(parent, {
+      title: '保存文件',
+      defaultPath: base,
+      filters: filtersOf(base)
+    });
+    if (r.canceled || !r.filePath) return { ok: false };
+    saveTarget = { kind: 'file', path: r.filePath };
+    return { ok: true, label: r.filePath };
+  });
+
+  ipcMain.handle('hw:writeFile', async (e, name, bytes) => {
+    if (!saveTarget) throw new Error('尚未选择保存位置');
+    let target;
+    if (saveTarget.kind === 'file') {
+      target = saveTarget.path;                        // 单文件：就用用户定的这个名字
+    } else {
+      target = path.join(saveTarget.dir, path.basename(String(name || 'handwriting.png')));
+    }
+    await fs.promises.writeFile(target, Buffer.from(bytes));
+    return { ok: true, path: target };
+  });
+}
+
 app.whenReady().then(() => {
+  registerSaveIpc();
   buildMenu();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

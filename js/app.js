@@ -124,22 +124,29 @@
   function setLineOffset(L, dx, dy) {
     for (var i = 0; i < L.tokens.length; i++) { L.tokens[i].offDx = dx; L.tokens[i].offDy = dy; }
   }
-  // 命中：给定 canvas 内的 CSS 坐标，返回该处所在行的 key（无命中返回 null）
-  function hitLine(page, cx, cy, cssW) {
-    var area = page.area;
+  // 命中：给定某个浏览页 canvas 内的 CSS 坐标，返回命中的行 { pi(源页), key }（无命中返回 null）。
+  // 被拖到别页的行也能在本页命中（按 (源页-浏览页)*页高 平移后判断）。
+  function hitLine(cx, cy, cssW, viewPi) {
+    if (!lastLayout) return null;
+    var area = (lastLayout.pages[viewPi].area) || lastLayout.area;
     if (!area || cssW <= 0) return null;
     var mmPerPx = area.pageW / cssW;
     var mx = cx * mmPerPx, my = cy * mmPerPx;
-    var lines = linesOfPage(page), best = null, bestD = 1e9;
-    for (var i = 0; i < lines.length; i++) {
-      var b = lineBBox(lines[i]);
-      if (mx < b.x0 - 1.5 || mx > b.x1 + 1.5 || my < b.y0 - 1.5 || my > b.y1 + 1.5) continue;
-      var mid = (b.y0 + b.y1) / 2, d = Math.abs(my - mid);
-      if (d < bestD) { bestD = d; best = lines[i].key; }
+    var pageH = area.pageH, best = null, bestD = 1e9;
+    for (var sp = 0; sp < lastLayout.pages.length; sp++) {
+      var shift = (sp - viewPi) * pageH;
+      var lines = linesOfPage(lastLayout.pages[sp]);
+      for (var i = 0; i < lines.length; i++) {
+        var b = lineBBox(lines[i]);
+        var y0 = b.y0 + shift, y1 = b.y1 + shift;
+        if (mx < b.x0 - 1.5 || mx > b.x1 + 1.5 || my < y0 - 1.5 || my > y1 + 1.5) continue;
+        var mid = (y0 + y1) / 2, d = Math.abs(my - mid);
+        if (d < bestD) { bestD = d; best = { pi: sp, key: lines[i].key }; }
+      }
     }
     return best;
   }
-  // 重画某页的微调覆盖层（每行一个虚线框）
+  // 重画某页的微调覆盖层（每行一个虚线框）。本页的行照旧，别页被拖进本页的行也画出框。
   function drawLineHighlights(pi) {
     var ov = overlays[pi];
     if (!ov) return;
@@ -150,6 +157,7 @@
     var w = ov.clientWidth;
     if (!w) { requestAnimationFrame(function () { drawLineHighlights(pi); }); return; }
     var pxPerMm = w / area.pageW;
+    var pageH = area.pageH;
     function mk(b, cls) {
       var el = document.createElement('div');
       el.className = 'line-box' + (cls ? ' ' + cls : '');
@@ -159,23 +167,21 @@
       el.style.height = ((b.y1 - b.y0) * pxPerMm) + 'px';
       return el;
     }
-    function box(b, cls) { ov.appendChild(mk(b, cls)); }
 
     if (dragMode === 'block') {
       var pb = pageBBox(page);
-      if (pb) box(pb, 'block');
+      if (pb) ov.appendChild(mk(pb, 'block'));
       return;
     }
-    var lines = linesOfPage(page);
-    // 已多选的行 → 朱砂细框
-    for (var i = 0; i < lines.length; i++) {
-      if (!isSelected(pi, lines[i].key)) continue;
-      box(lineBBox(lines[i]), 'sel');
-    }
-    // 未选中的行 → 虚线细框
-    for (var k = 0; k < lines.length; k++) {
-      if (isSelected(pi, lines[k].key)) continue;
-      box(lineBBox(lines[k]), 'dim');
+    for (var sp = 0; sp < lastLayout.pages.length; sp++) {
+      var shift = (sp - pi) * pageH;      // 源页的行平移到本页坐标
+      var lines = linesOfPage(lastLayout.pages[sp]);
+      for (var i = 0; i < lines.length; i++) {
+        var b = lineBBox(lines[i]);
+        var y0 = b.y0 + shift, y1 = b.y1 + shift;
+        if (y1 < 0 || y0 > pageH) continue;   // 不在本页画布内
+        ov.appendChild(mk({ x0: b.x0, x1: b.x1, y0: y0, y1: y1 }, isSelected(sp, lines[i].key) ? 'sel' : 'dim'));
+      }
     }
   }
   // 更新多选（切换或清空）后重画（不重新渲染画布，只用框标记，位置不变）
@@ -200,6 +206,8 @@
     if (!pageCaches[pi]) pageCaches[pi] = R.buildPageCache(lastLayout, pi, renderCfg(), previewDpi);
     return pageCaches[pi];
   }
+  // 取「任意页」的缓存（跨页绘制时用：把拖到别的页的行也画出来）
+  function cacheFor(pi) { return pageCache(pi); }
 
   /* ---------------- 撤回 / 重做（前后各 10 步） ----------------
    * 快照只存「调整状态」：整篇偏移 textOffset + 各行偏移。锚点用 token 原始坐标(rawX/rawY)，
@@ -259,7 +267,7 @@
   function refreshCacheAfterAdj() {
     for (var i = 0; i < lastPages.length; i++) {
       var cv = lastPages[i]; if (!cv) continue;
-      R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i));
+      R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i), cacheFor);
       drawLineHighlights(i);
     }
   }
@@ -284,6 +292,7 @@
   }
 
   // 拖动高频重绘：用缓存渲染（纸 blit 一次 + 每行 blit 一次），不再每帧重画全部字。
+  // 跨页拖动时源页的行移走了、目标页要显示移入的行 → 所有页都得刷（都走缓存，仍是每页十几次 drawImage）。
   var _dragRaf = 0, _dragPage = null;
   function queueDragRedraw(pi) {
     if (pi !== undefined) _dragPage = pi;
@@ -291,13 +300,10 @@
     _dragRaf = requestAnimationFrame(function () {
       _dragRaf = 0;
       if (!lastLayout) return;
-      var one = _dragPage; _dragPage = null;
-      var list = (one !== null && one !== undefined) ? [one] : null;
-      var n = list ? 1 : lastPages.length;
-      for (var k = 0; k < n; k++) {
-        var i = list ? list[k] : k;
+      _dragPage = null;
+      for (var i = 0; i < lastPages.length; i++) {
         var cv = lastPages[i]; if (!cv) continue;
-        R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i));   // 缓存 blit，不叠行框
+        R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i), cacheFor);   // 缓存 blit，不叠行框
       }
     });
   }
@@ -320,7 +326,7 @@
   function redrawPreview(pi) {
     var cv = lastPages[pi];
     if (!cv) return;
-    R.renderWithCache(cv, lastLayout, pi, renderCfg(), previewDpi, pageCache(pi));   // 预览统一走缓存（快且与拖动一致）
+    R.renderWithCache(cv, lastLayout, pi, renderCfg(), previewDpi, pageCache(pi), cacheFor);   // 预览统一走缓存（快且与拖动一致）
     drawLineHighlights(pi);
   }
   function syncEditUI() {
@@ -345,7 +351,7 @@
     refreshSel();
     if (lineEdit) toast(dragMode === 'block'
       ? '拖动整篇文字：所有页一起移动'
-      : '拖动一行调整位置；点一下行框可多选，或空白处框选，多选后一起拖', 'ok');
+      : '拖动一行调整位置，可拖到上一页/下一页；点一下行框可多选，或空白处框选，多选后一起拖', 'ok');
   }
   function setDragMode(m) {
     dragMode = m === 'block' ? 'block' : 'line';
@@ -368,10 +374,10 @@
     toast('已复位全部微调', 'ok');
   }
   // 按下某个已选中的行 → 整组一起拖动；否则按下未选中行 → 直接单行拖动
-  function startSelDrag(pi, key, e, rect) {
-    var page = lastLayout.pages[pi];
+  function startSelDrag(viewPi, hit, e, rect) {
+    var page = lastLayout.pages[viewPi];
     var area = page.area || lastLayout.area;
-    dragging = { kind: 'sel', pi: pi, key: key, startX: e.clientX, startY: e.clientY, mmPerPx: area.pageW / rect.width, sx: {}, moved: false, snap: snapAdj() };
+    dragging = { kind: 'sel', pi: viewPi, srcPi: hit.pi, key: hit.key, startX: e.clientX, startY: e.clientY, mmPerPx: area.pageW / rect.width, sx: {}, moved: false, snap: snapAdj() };
     for (var j = 0; j < selLines.length; j++) {
       var L = findLine(lastLayout.pages[selLines[j].pi], selLines[j].key);
       if (!L) continue;
@@ -400,22 +406,22 @@
           snap: snapAdj(), moved: false
         };
       } else {
-        var key = hitLine(page, cx, cy, rect.width);
-        if (key === null) {
+        var hit = hitLine(cx, cy, rect.width, pi);
+        if (hit === null) {
           // 空白处按下 → 开始框选（按住 Shift = 追加选择）
           marquee = { pi: pi, x0: cx, y0: cy, x1: cx, y1: cy, w: rect.width, add: !!e.shiftKey };
           try { cv.setPointerCapture(e.pointerId); } catch (err) { }
           e.preventDefault();
           return;
         }
-        if (isSelected(pi, key)) { startSelDrag(pi, key, e, rect); }
+        if (isSelected(hit.pi, hit.key)) { startSelDrag(pi, hit, e, rect); }
         else {
-          var L = findLine(page, key);
+          var L = findLine(lastLayout.pages[hit.pi], hit.key);
           if (!L) return;
           var o = lineOffset(L);
           dragging = {
-            kind: 'line', pi: pi, L: L, startX: e.clientX, startY: e.clientY, mmPerPx: mmPerPx,
-            baseDx: o.dx, baseDy: o.dy, snap: snapAdj(), moved: false
+            kind: 'line', pi: pi, srcPi: hit.pi, L: L, key: hit.key, startX: e.clientX, startY: e.clientY,
+            mmPerPx: mmPerPx, baseDx: o.dx, baseDy: o.dy, moved: false, snap: snapAdj()
           };
         }
       }
@@ -449,7 +455,7 @@
           var s0 = dragging.sx[k];
           if (L && s0) setLineOffset(L, s0.dx + (e.clientX - dragging.startX) * dragging.mmPerPx, s0.dy + (e.clientY - dragging.startY) * dragging.mmPerPx);
         }
-        queueDragRedraw(pi);   // 选中行主要在当前页，只刷当前页最快
+        queueDragRedraw();   // 多选也可能被拖到别页 → 所有页一起刷
       } else {
         dragging.moved = true;
         setLineOffset(dragging.L, dx, dy);
@@ -465,16 +471,18 @@
       }
       if (!dragging || dragging.pi !== pi) return;
       var wasLine = dragging.kind === 'line' && !dragging.moved;
-      var lineKey = wasLine ? dragging.L.key : null;
+      var linePi = wasLine ? dragging.srcPi : pi;
+      var lineKey = wasLine ? dragging.key : null;
       var wasSel = dragging.kind === 'sel' && !dragging.moved;
+      var selPi = wasSel ? dragging.srcPi : pi;
       var selKey = wasSel ? dragging.key : null;
       dragging = null; cv.classList.remove('dragging');
       endDragRedraw();   // 松手：补一帧全质量（拖动中是快速稿）+ 重建行高亮
       try { cv.releasePointerCapture(e.pointerId); } catch (err) { }
       // 单击未选中的行 → 加入多选（不拖动位置）
-      if (wasLine) { toggleSel(pi, lineKey); refreshSel(); }
+      if (wasLine) { toggleSel(linePi, lineKey); refreshSel(); }
       // 单击已选中的行（没拖动）→ 取消该行选中
-      else if (wasSel) { toggleSel(pi, selKey); refreshSel(); }
+      else if (wasSel) { toggleSel(selPi, selKey); refreshSel(); }
     }
     cv.addEventListener('pointerup', up);
     cv.addEventListener('pointercancel', up);
@@ -497,13 +505,18 @@
     if (x1 - x0 < 4 && y1 - y0 < 4) { refreshSel(); return; } // 空白处轻点 = 清空选择
     if (!marquee.add) clearSel();
     var page = lastLayout.pages[pi], area = page.area || lastLayout.area;
-    var mmPerPx = area.pageW / marquee.w;
+    var mmPerPx = area.pageW / marquee.w, pageH = area.pageH;
     var selM = { x0: x0 * mmPerPx, x1: x1 * mmPerPx, y0: y0 * mmPerPx, y1: y1 * mmPerPx };
-    var lines = linesOfPage(page);
-    for (var i = 0; i < lines.length; i++) {
-      var bb = lineBBox(lines[i]);
-      if (bb.x1 < selM.x0 || bb.x0 > selM.x1 || bb.y1 < selM.y0 || bb.y0 > selM.y1) continue;
-      if (!isSelected(pi, lines[i].key)) selLines.push({ pi: pi, key: lines[i].key });
+    // 扫所有源页：本页的行 + 被拖进本页的别页行（按 (源页-本页)*页高 平移后判断）
+    for (var sp = 0; sp < lastLayout.pages.length; sp++) {
+      var shift = (sp - pi) * pageH;
+      var lines = linesOfPage(lastLayout.pages[sp]);
+      for (var i = 0; i < lines.length; i++) {
+        var bb = lineBBox(lines[i]);
+        var by0 = bb.y0 + shift, by1 = bb.y1 + shift;
+        if (bb.x1 < selM.x0 || bb.x0 > selM.x1 || by1 < selM.y0 || by0 > selM.y1) continue;
+        if (!isSelected(sp, lines[i].key)) selLines.push({ pi: sp, key: lines[i].key });
+      }
     }
     refreshSel();
   }
@@ -877,7 +890,7 @@
         var stack = document.createElement('div');
         stack.className = 'page-stack';
         var cv = document.createElement('canvas');
-        R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i));   // 预览统一走缓存
+        R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i), cacheFor);   // 预览统一走缓存
         lastPages.push(cv);
         stack.appendChild(cv);
         var ov = document.createElement('div');
@@ -899,24 +912,67 @@
     });
   }
 
-  /* ---------------- 导出 PNG ---------------- */
+  /* ---------------- 导出 PNG ----------------
+   * 走宿主原生保存桥（native.js）：单页弹「另存为」、多页弹「选择文件夹」，
+   * 直接写盘，不再触发 WebView2/浏览器「下载多个文件」的拦截。 */
   function exportPNG(which) {
     if (!lastLayout) { toast('请先生成预览', 'err'); return; }
     var dpi = cfg.dpi;
+    var st = stamp();
     var idxs = (which === 'all') ? lastLayout.pages.map(function (_, i) { return i; }) : [which];
+    var items = idxs.map(function (i) { return { idx: i, name: '手写稿_' + st + '_p' + (i + 1) + '.png' }; });
     toast('正在导出 PNG（' + dpi + 'dpi）…');
-    var k = 0;
-    function one() {
-      if (k >= idxs.length) { toast('PNG 导出完成', 'ok'); return; }
-      var i = idxs[k];
-      var cv = document.createElement('canvas');
-      R.renderPage(cv, lastLayout, i, renderCfg(), dpi);
-      cv.toBlob(function (blob) {
-        download(blob, '手写稿_' + stamp() + '_p' + (i + 1) + '.png');
-        k++; setTimeout(one, 260);
-      }, 'image/png');
+    if (!HW.native) {                                  // 理论到不了，兜个底
+      idxs.forEach(function (i) {
+        var cv0 = document.createElement('canvas');
+        R.renderPage(cv0, lastLayout, i, renderCfg(), dpi);
+        cv0.toBlob(function (b) { download(b, '手写稿_' + st + '_p' + (i + 1) + '.png'); }, 'image/png');
+      });
+      return;
     }
-    one();
+    HW.native.exportAll(items, function (it) {
+      var cv = document.createElement('canvas');
+      R.renderPage(cv, lastLayout, it.idx, renderCfg(), dpi);
+      return new Promise(function (res) {
+        cv.toBlob(function (b) { cv.width = cv.height = 0; res(b); }, 'image/png');
+      });
+    }, function (done, total) {
+      if (total > 1) toast('正在导出 PNG… ' + done + '/' + total);
+    }).then(function (r) {
+      if (r && r.canceled) { toast('已取消导出'); return; }
+      if (r && r.error) { toast('导出失败：' + r.error, 'err'); return; }
+      var where = (r && r.label) ? '：' + r.label : '';
+      toast('已导出 ' + idxs.length + ' 张' + (r && r.fallback ? '（浏览器下载文件夹）' : where), 'ok');
+    });
+  }
+
+  /* ---------------- 导出预览图（所见即所得） ----------------
+   * 直接把预览那版渲染（previewDpi 低分辨率 + 同样的墨迹/抖动）落盘，
+   * 观感柔和、接近真实手写照片，不像高 dpi 导出那么锐利。 */
+  function exportPreview() {
+    if (!lastLayout) { toast('请先生成预览', 'err'); return; }
+    var st = stamp();
+    var items = lastLayout.pages.map(function (_, i) { return { idx: i, name: '手写稿_' + st + '_预览_p' + (i + 1) + '.png' }; });
+    toast('正在导出预览图…');
+    function render(it) {
+      var cv = document.createElement('canvas');
+      R.renderPage(cv, lastLayout, it.idx, renderCfg(), previewDpi);   // 与预览同分辨率、同参数
+      return new Promise(function (res) {
+        cv.toBlob(function (b) { cv.width = cv.height = 0; res(b); }, 'image/png');
+      });
+    }
+    if (!HW.native) {
+      items.forEach(function (it) { render(it).then(function (b) { download(b, it.name); }); });
+      return;
+    }
+    HW.native.exportAll(items, render, function (done, total) {
+      if (total > 1) toast('正在导出预览图… ' + done + '/' + total);
+    }).then(function (r) {
+      if (r && r.canceled) { toast('已取消导出'); return; }
+      if (r && r.error) { toast('导出失败：' + r.error, 'err'); return; }
+      var where = (r && r.label) ? '：' + r.label : '';
+      toast('已导出 ' + items.length + ' 张预览图' + (r && r.fallback ? '（浏览器下载文件夹）' : where), 'ok');
+    });
   }
 
   /* ---------------- 导出 PDF ---------------- */
@@ -932,13 +988,22 @@
       '<div class="progress" style="margin:14px auto 0"><i id="pg2" style="width:3%"></i></div>';
     box.appendChild(bar);
     var area = lastLayout.area;
+    var name = '手写稿_' + stamp() + '.pdf';
     var data = [], i = 0;
+    function finish(blob) {
+      var done = function (r) {
+        bar.remove(); busy = false;
+        if (r && r.canceled) { toast('已取消保存'); return; }
+        if (r && r.error) { toast('保存失败：' + r.error, 'err'); return; }
+        var where = (r && r.label) ? '：' + r.label : '';
+        toast('PDF 已保存' + (r && r.fallback ? '（浏览器下载文件夹）' : where), 'ok');
+      };
+      if (HW.native) HW.native.exportAll([{ name: name }], function () { return blob; }).then(done);
+      else { download(blob, name); done({}); }
+    }
     function step() {
       if (i >= N) {
-        var blob = R.buildPDF(data, area.pageW, area.pageH);
-        download(blob, '手写稿_' + stamp() + '.pdf');
-        bar.remove(); busy = false;
-        toast('PDF 生成完成', 'ok');
+        finish(R.buildPDF(data, area.pageW, area.pageH));
         return;
       }
       var cv = document.createElement('canvas');
@@ -1290,6 +1355,7 @@
     };
     $('#btnPngAll').onclick = function () { exportPNG('all'); };
     $('#btnPngOne').onclick = function () { exportPNG(0); };
+    $('#btnPngPreview').onclick = exportPreview;
     $('#btnPdf').onclick = exportPDF;
     $('#btnPrint').onclick = doPrint2;
     $('#btnSave').onclick = saveDraft;

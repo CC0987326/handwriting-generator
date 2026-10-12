@@ -866,9 +866,12 @@
     return { base: buildPaper(layoutRes, pageIdx, cfg, dpi), lines: buildLineLayers(layoutRes, pageIdx, cfg, dpi) };
   }
 
-  // 用缓存渲染一页：纸 blit 一次 + 每行按「行偏移 + 整篇偏移」blit。
-  // 每帧只做「1 + 行数」次 drawImage，字数再多也快。offs 从 token 真值读，调用方无需传。
-  function renderWithCache(canvas, layoutRes, pageIdx, cfg, dpi, cache) {
+  // 用缓存渲染一页：纸 blit 一次 + 每行按「行偏移 + 整篇偏移 + 跨页项」blit。
+  // 每帧只做「若干行数」次 drawImage，字数再多也快。offs 从 token 真值读，调用方无需传。
+  // 跨页项 (源页 - 当前页) * 页高：把「被拖到别的页」的行画到相邻页的画布上（画到画布外会被自动裁掉），
+  // 这样逐行微调能把一行拖到上一页/下一页，而不是拖出当页就凭空消失。
+  // cacheFor(p) 用于取其它源页的缓存；缺省时只画本页（退回旧行为）。
+  function renderWithCache(canvas, layoutRes, pageIdx, cfg, dpi, cache, cacheFor) {
     if (!cache) return renderPage(canvas, layoutRes, pageIdx, cfg, dpi);
     var page = layoutRes.pages[pageIdx];
     var area = page.area;
@@ -879,21 +882,32 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(cache.base, 0, 0);
-    // 每行当前偏移（从 token 真值读，拖动时 app.js 已更新 offDx/offDy）
-    var off = {};
-    for (var i = 0; i < page.tokens.length; i++) {
-      var t = page.tokens[i];
-      var k = (t.line === undefined ? 'x' : t.line);
-      if (!off[k]) off[k] = { dx: t.offDx || 0, dy: t.offDy || 0 };
-    }
+    var pageH = layoutRes.area.pageH;
     var gx = (cfg.textOffset && cfg.textOffset.dx) || 0;
     var gy = (cfg.textOffset && cfg.textOffset.dy) || 0;
-    for (var j = 0; j < cache.lines.length; j++) {
-      var lay = cache.lines[j];
-      var o = off[lay.line] || { dx: 0, dy: 0 };
-      var px = lay.x0 + mm2px(o.dx + gx, dpi);   // 不取整：亚像素平移，拖动更顺滑
-      var py = lay.y0 + mm2px(o.dy + gy, dpi);
-      ctx.drawImage(lay.canvas, px, py);
+    var nP = layoutRes.pages.length;
+    for (var p = 0; p < nP; p++) {
+      var src = layoutRes.pages[p];
+      // 每行当前偏移（从 token 真值读，拖动时 app.js 已更新 offDx/offDy）
+      var off = {}, anyDy = false;
+      for (var i = 0; i < src.tokens.length; i++) {
+        var t = src.tokens[i];
+        var k = (t.line === undefined ? 'x' : t.line);
+        if (!off[k]) off[k] = { dx: t.offDx || 0, dy: t.offDy || 0 };
+        if (t.offDy) anyDy = true;
+      }
+      // 别的页只有在「有纵向位移」时才可能跨到本页；没有就整页跳过（保住无微调时的速度）
+      if (p !== pageIdx && !anyDy && !gy) continue;
+      var c = (p === pageIdx) ? cache : (cacheFor ? cacheFor(p) : null);
+      if (!c) continue;
+      var crossMm = (p - pageIdx) * pageH;
+      for (var j = 0; j < c.lines.length; j++) {
+        var lay = c.lines[j];
+        var o = off[lay.line] || { dx: 0, dy: 0 };
+        var px = lay.x0 + mm2px(o.dx + gx, dpi);            // 不取整：亚像素平移，拖动更顺滑
+        var py = lay.y0 + mm2px(crossMm + o.dy + gy, dpi);  // 本页时 crossMm=0，与旧行为逐像素一致
+        ctx.drawImage(lay.canvas, px, py);
+      }
     }
     return canvas;
   }
@@ -927,27 +941,40 @@
 
     var globalDx = (cfg.textOffset && cfg.textOffset.dx) || 0;
     var globalDy = (cfg.textOffset && cfg.textOffset.dy) || 0;
-    // 逐字手写：先按「行」生成整体缓慢漂移（真人一行会整体起伏，而非每字乱跳）
-    var drng = RNG.makeRng('drift:' + layoutRes.seed + ':' + pageIdx);
+    var pageH = layoutRes.area.pageH;
     var messy = cfg.messyRatio / 100;
-    var lineMap = {};
-    for (var i = 0; i < page.tokens.length; i++) {
-      var tk = page.tokens[i];
-      var k = (tk.line === undefined ? 'x' : tk.line);
-      var d = lineMap[k];
-      if (!d) {
-        d = lineMap[k] = {
-          dy: gauss(drng) * messy * (tk.size || 5) * 0.14,
-          dx: gauss(drng) * messy * (tk.size || 5) * 0.06,
-          scale: 1 + gauss(drng) * messy * 0.05,
-          alpha: 1 - Math.min(0.16, Math.abs(gauss(drng)) * messy * 0.05),
-          // 微调：本行的逐行偏移 + 整篇全局偏移（都是 mm）
-          odx: (tk.offDx || 0) + globalDx,
-          ody: (tk.offDy || 0) + globalDy
-        };
+    // 逐字手写：先按「行」生成整体缓慢漂移（真人一行会整体起伏，而非每字乱跳）。
+    var drng = RNG.makeRng('drift:' + layoutRes.seed + ':' + pageIdx);
+    // 跨页项：一行被拖到相邻页后，仍画到本页画布上（越界自动裁掉）；rng/drng 按「源页」取，
+    // 与单页微调时逐像素一致——所以「拖出去的行」导出/打印与预览看到的一模一样。
+    for (var sp = 0; sp < layoutRes.pages.length; sp++) {
+      var src = layoutRes.pages[sp];
+      var shiftY = (sp - pageIdx) * pageH;
+      var isHome = (sp === pageIdx);
+      var sRng = isHome ? rng : RNG.makeRng('page:' + layoutRes.seed + ':' + sp);
+      var sDrng = isHome ? drng : RNG.makeRng('drift:' + layoutRes.seed + ':' + sp);
+      var lineMap = {};
+      var showOther = !isHome && (!!globalDy);
+      for (var i = 0; i < src.tokens.length; i++) {
+        var tk = src.tokens[i];
+        var k = (tk.line === undefined ? 'x' : tk.line);
+        var d = lineMap[k];
+        if (!d) {
+          // 每行都消耗一次 sDrng（与 buildLineLayers 同序），保证同一行的漂移与其基础位图一致
+          d = lineMap[k] = {
+            dy: gauss(sDrng) * messy * (tk.size || 5) * 0.14,
+            dx: gauss(sDrng) * messy * (tk.size || 5) * 0.06,
+            scale: 1 + gauss(sDrng) * messy * 0.05,
+            alpha: 1 - Math.min(0.16, Math.abs(gauss(sDrng)) * messy * 0.05)
+          };
+          // 别的页：只有该行确实有纵向位移、或整篇有 dy，才可能落到本页画布上
+          d.show = isHome || showOther || !!tk.offDy;
+        }
+        if (!d.show) continue;
+        tk.ox = (tk.offDx || 0) + globalDx;
+        tk.oy = shiftY + (tk.offDy || 0) + globalDy;
+        drawToken(ctx, tk, dpi, cfg, sRng, d);
       }
-      tk.ox = d.odx; tk.oy = d.ody;
-      drawToken(ctx, tk, dpi, cfg, rng, d);
     }
     return canvas;
   }
@@ -1056,10 +1083,10 @@
       cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
       return buildPageCache(res, pageIdx, cfg, dpi);
     },
-    renderWithCache: function (canvas, res, pageIdx, cfg, dpi, cache) {
+    renderWithCache: function (canvas, res, pageIdx, cfg, dpi, cache, cacheFor) {
       cfg.familyCn = cfg.familyCn || currentFamilyCn || HW.render._lastFamilyCn;
       cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
-      return renderWithCache(canvas, res, pageIdx, cfg, dpi, cache);
+      return renderWithCache(canvas, res, pageIdx, cfg, dpi, cache, cacheFor);
     },
     pagePixelSize: function (paper, dpi) {
       var a = areaOf(paper, {});
