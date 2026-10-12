@@ -19,7 +19,7 @@ namespace HandwritingApp
     internal static class Program
     {
         public const string AppName = "手写作业生成器";
-        public const string AppVer  = "1.0.0";                 // 载荷变了就改这里，强制重新解压
+        public const string AppVer  = "1.1.0";                 // 载荷变了就改这里，强制重新解压
         public const string WV2_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
         private const ulong MAGIC   = 0x484C574154544552UL;    // 'HLWATTER' 尾部标记
         private const int   TRAILER = 16;                      // [uint64 长度][uint64 标记]
@@ -257,6 +257,17 @@ namespace HandwritingApp
         {
             core.NewWindowRequested += async (s, e) =>
             {
+                // 外链（http/https，如更新提示里的「去下载」）→ 交给系统默认浏览器，不在本程序里开
+                var uri = e.Uri ?? "";
+                if (uri.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    e.Handled = true;
+                    try { System.Diagnostics.Process.Start(uri); } catch (Exception) { }
+                    return;
+                }
+
+                // 其余（about:blank / file://，打印用 newWindow）→ 内嵌子窗口，保留打印流程
                 var deferral = e.GetDeferral();
                 try
                 {

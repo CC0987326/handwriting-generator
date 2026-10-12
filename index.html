@@ -270,5 +270,14 @@
 <script src="js/textures.js"></script>
 <script src="js/render.js"></script>
 <script src="js/app.js"></script>
+<script src="js/updater.js"></script>
+<script>
+/* 更新检查：等界面初始化完再查，别跟首屏抢资源 */
+(function () {
+  function go() { try { HW.updater.check(); } catch (e) { } }
+  if (document.readyState === 'complete') setTimeout(go, 2500);
+  else window.addEventListener('load', function () { setTimeout(go, 2500); });
+})();
+</script>
 </body>
 </html>

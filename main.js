@@ -88,7 +88,7 @@ function buildMenu() {
           label: '关于',
           click: () => dialog.showMessageBox(win, {
             type: 'info', title: '关于',
-            message: '手写作业生成器',
+            message: '手写作业生成器 · v' + app.getVersion(),
             detail: '纯本地运行，文字不上传任何服务器，断网也能用。\n内置手写字体与实拍纸张，可自行增删纸张、导出高清 PNG / PDF。',
             buttons: ['好']
           })
