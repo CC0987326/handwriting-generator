@@ -313,7 +313,12 @@
   // 拖动中的廉价整页重绘：纸 blit + 纯 fillText，不建逐字缓存（不碰 getImageData），保证跟手。
   function renderFlowPreview(pi) {
     var cv = lastPages[pi]; if (!cv) return;
-    R.renderReflowPreview(cv, lastLayout, pi, renderCfg(), previewDpi, pagePaper(pi));
+    try {
+      R.renderReflowPreview(cv, lastLayout, pi, renderCfg(), previewDpi, pagePaper(pi));
+    } catch (e) {
+      // 兜底：廉价预览万一出错（画布已被清空），退回全质量缓存渲染——宁可慢一帧，也绝不让内容整片消失
+      try { R.renderWithCache(cv, lastLayout, pi, renderCfg(), previewDpi, pageCache(pi), cacheFor); } catch (e2) { }
+    }
   }
   // 是否处于「整篇形状拖动中」→ 走廉价预览；松手即置回 false，末次落定走全质量路径。
   var flowPreviewing = false;
@@ -425,7 +430,9 @@
     if (!lastLayout) return;
     var p = curPaper(), fams = { cn: fontFamilyFor(curFontCn()), en: fontFamilyFor(curFontEn()) };
     var oldN = lastPages.length;
-    lastLayout = R.layout(rawText, p, collectOpts(), fams);
+    var o = collectOpts();
+    o.seed = lastLayout.seed;   // 固定本次预览的随机种子：否则 layout 每帧都重掷种子 → 字的抖动/墨色整片乱跳，看着像内容没了
+    lastLayout = R.layout(rawText, p, o, fams);
     pageCaches = []; lastCacheSig = '';
     if (oldN !== lastLayout.pages.length) buildPagesDOM();
     if (flowPreviewing) {
