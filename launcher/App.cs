@@ -19,7 +19,7 @@ namespace HandwritingApp
     internal static class Program
     {
         public const string AppName = "手写作业生成器";
-        public const string AppVer  = "1.1.0";                 // 载荷变了就改这里，强制重新解压
+        public const string AppVer  = "1.3.0";                 // 载荷变了就改这里，强制重新解压
         public const string WV2_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
         private const ulong MAGIC   = 0x484C574154544552UL;    // 'HLWATTER' 尾部标记
         private const int   TRAILER = 16;                      // [uint64 长度][uint64 标记]

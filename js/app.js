@@ -65,6 +65,7 @@
   var dragging = null;      // 正在拖动的对象
   var selLines = [];        // 多选的行：{pi, key}
   var marquee = null;       // 框选矩形（CSS 像素，相对当前覆盖层）
+  var flowDrag = null;      // 整篇形状拖动：{ handle, src:{x,y,w,h}, startX, startY, mmPerPx, moved, snap, dlg }
 
   function selIndex(pi, key) {
     for (var i = 0; i < selLines.length; i++) if (selLines[i].pi === pi && selLines[i].key === key) return i;
@@ -171,6 +172,8 @@
     if (dragMode === 'block') {
       var pb = pageBBox(page);
       if (pb) ov.appendChild(mk(pb, 'block'));
+      // 整篇形状调整：非格子纸时画出可拖的版面框 + 8 个把手
+      if (R.supportsFlowBox(page.paper)) drawFlowHandles(ov, pi, pxPerMm, area);
       return;
     }
     for (var sp = 0; sp < lastLayout.pages.length; sp++) {
@@ -183,6 +186,89 @@
         ov.appendChild(mk({ x0: b.x0, x1: b.x1, y0: y0, y1: y1 }, isSelected(sp, lines[i].key) ? 'sel' : 'dim'));
       }
     }
+  }
+  // 整篇形状：画一个可拖边框 + 8 个把手（nw/n/ne/e/se/s/sw/w）。
+  // 把手在「行覆盖层」里（不是画布的子元素），故拖动监听挂在覆盖层上，用 document 级 move/up 兜底。
+  var FLOW_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+  function drawFlowHandles(ov, pi, pxPerMm, area) {
+    if (!lastLayout || pi !== 0) return;   // 版面框只画在第一页（它决定了整篇的形状）
+    var fb = R.flowBoxOf(curPaper(), collectOpts());
+    var el = document.createElement('div');
+    el.className = 'flow-box';
+    el.style.left = (fb.x * pxPerMm) + 'px';
+    el.style.top = (fb.y * pxPerMm) + 'px';
+    el.style.width = (fb.w * pxPerMm) + 'px';
+    el.style.height = (fb.h * pxPerMm) + 'px';
+    for (var i = 0; i < FLOW_HANDLES.length; i++) {
+      var h = document.createElement('div');
+      h.className = 'flow-handle fh-' + FLOW_HANDLES[i];
+      h.setAttribute('data-h', FLOW_HANDLES[i]);
+      el.appendChild(h);
+    }
+    ov.appendChild(el);
+  }
+  function flowDown(e) {
+    if (!lineEdit || dragMode !== 'block' || !lastLayout || !lastPages[0]) return;
+    var hd = e.target && e.target.getAttribute && e.target.getAttribute('data-h');
+    if (!hd) return;   // 只接管「按在把手上」的按下，框内空处仍归画布的整篇平移
+    var p0 = lastLayout.pages[0], a = p0.area || lastLayout.area;
+    var rect = lastPages[0].getBoundingClientRect();
+    flowDrag = {
+      handle: hd, pi: 0, startX: e.clientX, startY: e.clientY, mmPerPx: a.pageW / rect.width,
+      src: R.flowBoxOf(curPaper(), collectOpts()), snap: snapAdj(), moved: false
+    };
+    document.addEventListener('pointermove', flowMove);
+    document.addEventListener('pointerup', flowUp);
+    document.addEventListener('pointercancel', flowUp);
+    try { document.body.classList.add('flow-resizing'); } catch (err) { }
+    e.preventDefault(); e.stopPropagation();
+  }
+  var _flowRaf = 0, _flowEvt = null;
+  function flowMove(e) {
+    if (!flowDrag) return;
+    if (!flowDrag.moved) {
+      var mx = e.clientX - flowDrag.startX, my = e.clientY - flowDrag.startY;
+      if (mx * mx + my * my < 9) return;
+      flowDrag.moved = true; pushUndo();   // 形状改动也进撤回历史（拖动只记一步）
+    }
+    _flowEvt = e;
+    if (_flowRaf) return;   // 重排较贵：一帧最多重排一次
+    _flowRaf = requestAnimationFrame(function () {
+      _flowRaf = 0;
+      if (flowDrag && _flowEvt) updateFlowDrag(_flowEvt);
+    });
+  }
+  function flowUp() {
+    document.removeEventListener('pointermove', flowMove);
+    document.removeEventListener('pointerup', flowUp);
+    document.removeEventListener('pointercancel', flowUp);
+    try { document.body.classList.remove('flow-resizing'); } catch (err) { }
+    if (_flowRaf) { cancelAnimationFrame(_flowRaf); _flowRaf = 0; }
+    var d = flowDrag;
+    if (d && d.moved && _flowEvt) updateFlowDrag(_flowEvt);   // 保证末次位置一定落定（rAF 被节流时也不丢）
+    flowDrag = null;
+    if (d && d.moved) relayoutFlow();   // 松手：用最后位置重排 + 重画把手
+  }
+  // 整篇形状拖动：改版面框；每次改动都用新框重排（框内快速重画）
+  function updateFlowDrag(e) {
+    var d = flowDrag;
+    var dx = (e.clientX - d.startX) * d.mmPerPx, dy = (e.clientY - d.startY) * d.mmPerPx;
+    var s = d.src, x = s.x, y = s.y, w = s.w, h = s.h, MIN = 24;
+    var H = d.handle;
+    if (H.indexOf('e') >= 0) w = s.w + dx;
+    if (H.indexOf('s') >= 0) h = s.h + dy;
+    if (H.indexOf('w') >= 0) { x = s.x + dx; w = s.w - dx; }
+    if (H.indexOf('n') >= 0) { y = s.y + dy; h = s.h - dy; }
+    if (w < MIN) { if (H.indexOf('w') >= 0) x = s.x + (s.w - MIN); w = MIN; }
+    if (h < MIN) { if (H.indexOf('n') >= 0) y = s.y + (s.h - MIN); h = MIN; }
+    cfg.flowBox = { x: x, y: y, w: w, h: h };
+    relayoutFlow();
+  }
+  // 在画布/覆盖层上绑定：把手按下（覆盖层）+ 整篇/逐行（画布）
+  function bindFlowHandles(ov) {
+    if (ov._hwFlowBound) return;
+    ov._hwFlowBound = true;
+    ov.addEventListener('pointerdown', flowDown);
   }
   // 更新多选（切换或清空）后重画（不重新渲染画布，只用框标记，位置不变）
   function refreshSel() {
@@ -197,7 +283,11 @@
     var c = renderCfg();
     return [lastLayout ? lastLayout.seed : '', previewDpi, c.familyCn, c.familyEn, c.inkColor,
       c.inkJitter, c.inkPressure, c.inkTexture, c.bold, c.mistakeRate, c.messyRatio, c.charRandom,
-      c.weightCn, c.weightEn, c.pageNumber, c.customImage ? (c.customImage.width + 'x' + c.customImage.height) : ''
+      c.weightCn, c.weightEn, c.pageNumber,
+      // 整篇拖动(offset)与每行偏移都改位置而不改字形，缓存 blit 时实时叠加即可；
+      // 但「整篇形状调整」会改变换行/分页（字形内容变），必须进签名触发重建，否则拖框后显示错位。
+      (cfg.flowBox ? [cfg.flowBox.x, cfg.flowBox.y, cfg.flowBox.w, cfg.flowBox.h].join(',') : ''),
+      c.customImage ? (c.customImage.width + 'x' + c.customImage.height) : ''
     ].join('|');
   }
   function pageCache(pi) {
@@ -224,11 +314,22 @@
         }
       }
     }
-    return { off: { dx: (cfg.textOffset && cfg.textOffset.dx) || 0, dy: (cfg.textOffset && cfg.textOffset.dy) || 0 }, rows: rows };
+    return {
+      off: { dx: (cfg.textOffset && cfg.textOffset.dx) || 0, dy: (cfg.textOffset && cfg.textOffset.dy) || 0 },
+      rows: rows,
+      flow: cfg.flowBox ? { x: cfg.flowBox.x, y: cfg.flowBox.y, w: cfg.flowBox.w, h: cfg.flowBox.h } : null
+    };
   }
   function applyAdj(s) {
     if (!lastLayout) return;
     cfg.textOffset = { dx: s.off.dx, dy: s.off.dy };
+    // 撤回/重做可能同时改回「整篇形状」——形状变了得重新排版（重排后再落各行偏移）
+    var cb = cfg.flowBox ? [cfg.flowBox.x, cfg.flowBox.y, cfg.flowBox.w, cfg.flowBox.h].join(',') : '';
+    var sb = s.flow ? [s.flow.x, s.flow.y, s.flow.w, s.flow.h].join(',') : '';
+    if (cb !== sb) {
+      cfg.flowBox = s.flow ? { x: s.flow.x, y: s.flow.y, w: s.flow.w, h: s.flow.h } : null;
+      relayoutFlow();
+    }
     for (var p = 0; p < lastLayout.pages.length; p++) {
       var toks = lastLayout.pages[p].tokens;
       for (var i = 0; i < toks.length; i++) { toks[i].offDx = 0; toks[i].offDy = 0; }
@@ -270,6 +371,46 @@
       R.renderWithCache(cv, lastLayout, i, renderCfg(), previewDpi, pageCache(i), cacheFor);
       drawLineHighlights(i);
     }
+  }
+
+  /* ---------------- 整篇「形状调整」：拖边框自由改整篇版面，文字自动重排 ----------------
+   * 只在「整篇」模式下、且当前纸张不是格子纸（格子用印刷格，无法改形状）时可用。
+   * 拖四周/四角 = 改版面框，字号与边距不变 → 框变宽每行字变多、变窄变少（类似 Word 文本框）。 */
+  var rawText = '';
+  function pageDomCount() { return lastPages.length; }
+  // 按当前 lastLayout 重建预览页 DOM（页数变化时用；页数没变只重画，不重建）
+  function buildPagesDOM() {
+    var box = $('#preview');
+    box.innerHTML = '';
+    lastPages = []; overlays = [];
+    var total = lastLayout.pages.length;
+    for (var i = 0; i < total; i++) {
+      var holder = document.createElement('div'); holder.className = 'page-holder';
+      var stack = document.createElement('div'); stack.className = 'page-stack';
+      var cv = document.createElement('canvas');
+      lastPages.push(cv); stack.appendChild(cv);
+      var ov = document.createElement('div'); ov.className = 'line-overlay'; stack.appendChild(ov);
+      overlays.push(ov);
+      bindDrag(cv, i);
+      bindFlowHandles(ov);
+      holder.appendChild(stack);
+      var cap = document.createElement('div'); cap.className = 'cap';
+      cap.textContent = '第 ' + (i + 1) + ' / ' + total + ' 页（预览已压缩，下载为高清）';
+      holder.appendChild(cap);
+      box.appendChild(holder);
+    }
+    setMeta('共 ' + total + ' 页 · ' + cfg.dpi + ' dpi');
+  }
+  // 形状变了 → 用新框重新排版，再重画。页数没变就不重建 DOM（更快、也不打断拖动）。
+  function relayoutFlow() {
+    if (!lastLayout) return;
+    var p = curPaper(), fams = { cn: fontFamilyFor(curFontCn()), en: fontFamilyFor(curFontEn()) };
+    var oldN = lastPages.length;
+    lastLayout = R.layout(rawText, p, collectOpts(), fams);
+    pageCaches = []; lastCacheSig = '';
+    if (oldN !== lastLayout.pages.length) buildPagesDOM();
+    redrawAll();
+    refreshSel();
   }
   function undo() {
     if (!undoStack.length) { toast('没有可撤回的调整', 'err'); return; }
@@ -344,21 +485,28 @@
   }
   function setLineEdit(on) {
     lineEdit = !!on;
-    if (!lineEdit) clearSel();
+    if (!lineEdit) { clearSel(); flowDrag = null; }
     document.body.classList.toggle('line-edit', lineEdit);
     syncEditUI();
     for (var i = 0; i < lastPages.length; i++) drawLineHighlights(i);
     refreshSel();
     if (lineEdit) toast(dragMode === 'block'
-      ? '拖动整篇文字：所有页一起移动'
+      ? (R.supportsFlowBox(curPaper())
+        ? '整篇模式：拖四周/四角把手可自由改整篇形状，文字随宽窄自动重排；拖框内则整篇平移'
+        : '拖动整篇文字：所有页一起移动')
       : '拖动一行调整位置，可拖到上一页/下一页；点一下行框可多选，或空白处框选，多选后一起拖', 'ok');
   }
   function setDragMode(m) {
     dragMode = m === 'block' ? 'block' : 'line';
-    clearSel();
+    clearSel(); flowDrag = null;
     syncEditUI();
     for (var i = 0; i < lastPages.length; i++) drawLineHighlights(i);
     refreshSel();
+    if (lineEdit && dragMode === 'block') {
+      toast(R.supportsFlowBox(curPaper())
+        ? '拖四周/四角的把手改整篇形状，文字自动重排；拖框中间整篇平移'
+        : '当前是格子纸（印刷格固定），换横线/空白纸才能改整篇形状', 'ok');
+    }
   }
   function resetAdj() {
     pushUndo();   // 复位也进历史，可撤回
@@ -369,7 +517,8 @@
         for (var i = 0; i < toks.length; i++) { toks[i].offDx = 0; toks[i].offDy = 0; }
       }
     }
-    redrawAll();
+    if (cfg.flowBox) { cfg.flowBox = null; relayoutFlow(); }   // 形状也复位
+    else redrawAll();
     refreshSel();
     toast('已复位全部微调', 'ok');
   }
@@ -864,7 +1013,9 @@
       trackCn: cfg.trackCn || 0,
       trackEn: cfg.trackEn || 0,
       lineSpacing: cfg.lineSpacing,
-      bold: cfg.bold
+      bold: cfg.bold,
+      // 整篇「形状调整」框（mm）：调过才带，文字按它在框内重排
+      flowBox: (cfg.flowBox && cfg.flowBox.w > 0) ? cfg.flowBox : undefined
     };
   }
 
@@ -899,10 +1050,15 @@
   }
 
   /* ---------------- 预览 ---------------- */
+  // 首次进入、框还空着时，用「示例文字」自动生成一版（不填进输入框，保持半隐式提示 + 一键清空的好用）
+  var samplePreviewed = false;
+  var SAMPLE_TEXT = '语文作业：\n\n请同学们认真抄写下面的段落，注意书写工整，标点符号要占格。中英文都要写规范。\n\n春天来了，万物复苏。小草偷偷地从土里钻出来，嫩嫩的，绿绿的。园子里，田野里，瞧去，一大片一大片满是的。\n\nEnglish Practice: Spring is coming, and everything comes back to life. The little grass sneaks out of the soil, tender and green. Let us read the passage aloud and copy it carefully.\n\n春天来了，一起读：Spring is the best season of the year. 让我们珍惜时光，好好学习，天天向上。';
   function doPreview() {
     if (busy) return;
-    var text = $('#text').value;
+    var text = ($('#text') && $('#text').value) || '';
+    if (!text.trim() && !samplePreviewed) { text = SAMPLE_TEXT; samplePreviewed = true; }   // 首屏示例自动出图
     if (!text || !text.trim()) { toast('请先输入要转成手写的文字', 'err'); return; }
+    rawText = text;   // 供「整篇形状调整」重排时复用（可能与输入框不同：首屏用的是示例文字）
     if (text.length > 20000) { toast('文字太多了，先拆小一点再生', 'err'); return; }
     busy = true;
     var box = $('#preview');
@@ -945,6 +1101,7 @@
         stack.appendChild(ov);
         overlays.push(ov);
         bindDrag(cv, i);
+        bindFlowHandles(ov);
         holder.appendChild(stack);
         var cap = document.createElement('div');
         cap.className = 'cap'; cap.textContent = '第 ' + (i + 1) + ' / ' + total + ' 页（预览已压缩，下载为高清）';
@@ -1414,6 +1571,15 @@
     $('#btnLoadFont').onclick = function () { $('#fileFont').click(); };
 
     $('#btnPreview').onclick = doPreview;
+    // 一键清空文字内容（示例提示是 placeholder，本身不占内容）
+    $('#btnClearText').onclick = function () {
+      var t = $('#text');
+      t.value = '';
+      refreshStatus();
+      if (lineEdit) { rawText = ''; }
+      try { t.focus(); } catch (e) { }
+      toast('已清空文字内容', 'ok');
+    };
     $('#btnLineEdit').onclick = function () { setLineEdit(!lineEdit); };
     $('#btnModeLine').onclick = function () { setDragMode('line'); };
     $('#btnModeBlock').onclick = function () { setDragMode('block'); };
@@ -1479,7 +1645,10 @@
     // 中文预览子集（各几 KB）自动加载，中文列表即时显示"手写示例"；完整字体仍按需加载
     loadCnPreviews(buildFontCombo);
 
-    $('#text').value = '语文作业：\n\n请同学们认真抄写下面的段落，注意书写工整，标点符号要占格。中英文都要写规范。\n\n春天来了，万物复苏。小草偷偷地从土里钻出来，嫩嫩的，绿绿的。园子里，田野里，瞧去，一大片一大片满是的。\n\nEnglish Practice: Spring is coming, and everything comes back to life. The little grass sneaks out of the soil, tender and green. Let us read the passage aloud and copy it carefully.\n\n春天来了，一起读：Spring is the best season of the year. 让我们珍惜时光，好好学习，天天向上。';
+    // 示例内容改成「半隐式提示」：以 placeholder 呈现，用户一点框开始输入就自动覆盖，
+    // 不必再手动清空。（placeholder 不属于 value，不会被生成、也不会进字符统计）
+    $('#text').placeholder = '把要写成手写的文字粘在这里（也可以导入 Word / 图片）。\n\n例：\n语文作业：请同学们认真抄写下面的段落，注意书写工整，标点符号要占格。\n\n春天来了，万物复苏。小草偷偷地从土里钻出来，嫩嫩的，绿绿的。\n\nEnglish Practice: Spring is coming, and everything comes back to life. Let us read the passage aloud.';
+    refreshStatus();
     refreshStatus();
     setTimeout(doPreview, 200);
   }

@@ -147,6 +147,8 @@ select,input[type=text],input[type=number]{
   width:100%;background:var(--paper);border:1px solid var(--hair-2);border-radius:var(--r);padding:8px 10px;outline:none;
 }
 textarea::placeholder,input::placeholder{color:var(--ink-3)}
+/* 文字内容的示例是「半隐式提示」：淡、可多行，用户一输入就被覆盖 */
+#text::placeholder{color:var(--ink-3);opacity:.62;white-space:pre-line;line-height:1.9}
 input[type=color]{width:46px;height:34px;padding:2px;background:var(--paper);border:1px solid var(--hair-2);border-radius:var(--r);cursor:pointer}
 .inkdot{width:24px;height:24px;border-radius:50%;border:1px solid var(--hair-2);cursor:pointer;transition:transform .12s ease;display:inline-block;box-shadow:inset 0 0 0 2px var(--paper)}
 .inkdot:hover{transform:scale(1.1)}
@@ -279,6 +281,23 @@ body.line-edit .page-holder canvas{cursor:grab}
 .deskbar .btn.sm{align-self:center}
 .deskbar .modes{display:inline-flex;gap:6px;align-self:center}
 .line-box.block{border-style:solid;border-width:1px}
+
+/* ---------- 整篇「形状调整」：可拖的版面框 + 8 个把手 ---------- */
+.flow-box{position:absolute;box-sizing:border-box;border:1.5px dashed var(--verm);background:var(--verm-tint);pointer-events:none}
+.flow-box > .flow-handle{
+  position:absolute;width:20px;height:20px;margin:-10px 0 0 -10px;pointer-events:auto;
+  background:var(--paper);border:2px solid var(--verm);border-radius:50%;box-sizing:border-box;
+  box-shadow:0 1px 3px rgba(0,0,0,.28);touch-action:none;
+}
+.flow-handle.fh-nw{left:0;top:0;cursor:nwse-resize}
+.flow-handle.fh-n{left:50%;top:0;cursor:ns-resize}
+.flow-handle.fh-ne{left:100%;top:0;cursor:nesw-resize}
+.flow-handle.fh-e{left:100%;top:50%;cursor:ew-resize}
+.flow-handle.fh-se{left:100%;top:100%;cursor:nwse-resize}
+.flow-handle.fh-s{left:50%;top:100%;cursor:ns-resize}
+.flow-handle.fh-sw{left:0;top:100%;cursor:nesw-resize}
+.flow-handle.fh-w{left:0;top:50%;cursor:ew-resize}
+body.line-edit .flow-handle:active{background:var(--verm)}
 
 /* 空状态：一张画好线的空白练习页，本身就在展示"排线"这件事 */
 .empty{

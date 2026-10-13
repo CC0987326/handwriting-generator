@@ -22,6 +22,12 @@
   }
   function isNoLineStart(ch) { return CAT.NO_LINE_START.indexOf(ch) >= 0; }
   function isNoLineEnd(ch) { return CAT.NO_LINE_END.indexOf(ch) >= 0; }
+  // 英文「词」字符：字母、数字、词内撇号（for don't / it's）。用于整词换行，避免把单词拦腰截断。
+  function isWordChar(ch) {
+    if (!ch) return false;
+    var c = ch.charCodeAt(0);
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || ch === "'" || ch === '’';
+  }
 
   // 统一「谁归中文字体」：CJK 之外，把全套中文标点 / 全角符号也一并归到中文字体。
   // 这样选任意一款中文字体，整篇（含引号「」“” — … 等）都是这一款，不会漏到英文字体里去。
@@ -156,6 +162,48 @@
     return lines;
   }
 
+  // 与 wrapTokens 同规则，但英文「整词换行」：一个词的字符绝不被拆到两行。
+  // 只有当一个词放不下、且它是本行第一个词（被迫单独成行）时才落回逐字符断行，避免死循环。
+  function wrapTokensWord(tokens, capacity) {
+    var lines = [], cur = [], used = 0, i = 0, n = tokens.length;
+    function flush() { if (cur.length) { lines.push(cur); cur = []; used = 0; } }
+    while (i < n) {
+      var tk = tokens[i], u = tk.unit;
+      if (used + u <= capacity) { cur.push(tk); used += u; i++; continue; }
+      if (!cur.length) { cur.push(tk); used += u; i++; continue; }   // 单个 token 就超行宽，硬放
+      var ch = tk.ch;
+      if (isNoLineStart(ch)) { cur.push(tk); used += u; i++; flush(); continue; }  // 避头：悬挂
+      if (isNoLineEnd(cur[cur.length - 1].ch)) {                     // 避尾：行末开括号推到下一行
+        var mv = cur.pop(); used -= mv.unit; flush(); cur.push(mv); used = mv.unit; continue;
+      }
+      if (isWordChar(ch) && isWordChar(cur[cur.length - 1].ch)) {
+        // 词被拦腰截断 → 把该词在本行已排的部分整段移到下一行
+        var k = cur.length;
+        while (k > 0 && isWordChar(cur[k - 1].ch)) k--;
+        var word = cur.splice(k);
+        var wUsed = 0; for (var q = 0; q < word.length; q++) wUsed += word[q].unit;
+        used -= wUsed;
+        flush();
+        cur = word; used = wUsed;
+        continue;   // 处理当前 token（此时是本行第一个词）
+      }
+      var start = i;
+      while (start < n && !isWordChar(tokens[start].ch)) start++;   // 跳过行首的空格/标点
+      if (start < n) {
+        // 下一个「词」从 start 开始；接得上就整体下移，不拆断
+        var we = start, wU = 0;
+        while (we < n && isWordChar(tokens[we].ch)) { wU += tokens[we].unit; we++; }
+        if (used + wU <= capacity) {
+          for (var k2 = 0; k2 < start - i; k2++) { cur.push(tokens[i + k2]); used += tokens[i + k2].unit; }
+          i = start; continue;
+        }
+      }
+      flush();   // 词本身太长或本行已有内容 → 从该词起另起一行
+    }
+    flush();
+    return lines;
+  }
+
   // 转换为 unit 数组：CJK=2，拉丁=1（格纸）；flow 模式用像素宽度另算
   function toUnits(paras) {
     return paras.map(function (p) {
@@ -184,6 +232,20 @@
   function areaOf(paper, opts) {
     var ps = pageSize(paper), m = margins(paper, opts);
     return { x: m.l, y: m.t, w: ps.w - m.l - m.r, h: ps.h - m.t - m.b, pageW: ps.w, pageH: ps.h, m: m };
+  }
+  // 整篇「手动调整形状」：用户按住四周边框改出的版面框（mm）。存在时覆盖纸张默认边距，
+  // 文字在这个框里自动重排（拉宽→每行更多字），并只在框内分页。
+  function flowBounds(paper, opts, area) {
+    var fb = opts && opts.flowBox;
+    if (!fb) return null;
+    var x0 = Math.max(0, Math.min(fb.x, fb.x + fb.w));
+    var y0 = Math.max(0, Math.min(fb.y, fb.y + fb.h));
+    var x1 = Math.min(area.pageW, Math.max(fb.x, fb.x + fb.w));
+    var y1 = Math.min(area.pageH, Math.max(fb.y, fb.y + fb.h));
+    // 太小或基本等于整页 → 视作没调（也顺手清掉，避免老草稿里 {0,0,0,0} 污染排版）
+    if (x1 - x0 < 12 || y1 - y0 < 12) { delete opts.flowBox; return null; }
+    if (x1 - x0 > area.pageW - 1 && y1 - y0 > area.pageH - 1) { delete opts.flowBox; return null; }
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, pageW: area.pageW, pageH: area.pageH, m: area.m };
   }
 
   /* ================= 排版主函数（输出 mm 坐标） ================= */
@@ -228,7 +290,7 @@
       }
       newGridPage();
       for (var pi = 0; pi < units.length; pi++) {
-        var lineTokens = wrapTokens(units[pi], capacity);
+        var lineTokens = wrapTokensWord(units[pi], capacity);
         for (var li = 0; li < lineTokens.length; li++) {
           if (row >= rows) newGridPage();
           var tok = lineTokens[li], used = 0, slot = 0;
@@ -272,60 +334,89 @@
         if (fsMm > cap) fsMm = cap;
         if (enFsMm > cap) enFsMm = cap;
       }
-      var lineH = (paper.lineMm || 10.5) * ((opts && opts.lineSpacing) || 1.0);
-      var rightLimit = area.x + area.w - fsMm * 0.2; // 右边界（留悬挂余量）
-      var linesPerPage = Math.max(1, Math.floor(area.h / lineH));
-      var indent = fsMm * 2;                          // 段首缩进两字
+      // 整篇「形状调整」：有 flowBox 就按它排版（框内自动重排 + 只在框内分页），否则用纸张默认区域。
+      var fArea = (!opts || !opts.noFlowBox) ? flowBounds(paper, opts, area) : null;
+      if (!fArea) fArea = area;
+      var bodyLineH = (paper.lineMm || 10.5) * ((opts && opts.lineSpacing) || 1.0);
+      var enLineH = bodyLineH * 0.80;   // 纯英文行更矮，一行能多排几行（接近真人写英文的感觉）
+      var indent = fsMm * 2;            // 段首缩进两字
       var pkind = paper.kind === 'custom' ? 'custom' : (paper.kind === 'line' ? 'line' : 'blank');
-      var page2 = null, lineIdx = 0, xcur = area.x;
+      // 「拉丁行」判定：该行除空格/制表符外全是英文/数字/半角 → 用矮行高；有中文或全角标点 → 用正常行高。
+      function lineHeightOf(str) {
+        for (var i = 0; i < str.length; i++) {
+          var c = str[i];
+          if (c === ' ' || c === '\t') continue;
+          if (isCnChar(c.codePointAt(0), c)) return bodyLineH;
+        }
+        return enLineH;
+      }
+      var page2 = null, lineIdx2 = 0, yLine = 0;
       function newFlowPage() {
         if (page2 && page2.tokens.length) pages.push(page2);
-        page2 = { kind: pkind, paper: paper, area: area,
-          geom: { left: area.x, top: area.y, lineH: lineH, linesPerPage: linesPerPage, fsMm: fsMm }, tokens: [] };
-        lineIdx = 0; xcur = area.x + indent;
+        page2 = { kind: pkind, paper: paper, area: fArea,
+          geom: { left: fArea.x, top: fArea.y, lineH: bodyLineH, linesPerPage: 0, fsMm: fsMm, flow: !!fArea.flow }, tokens: [] };
+        lineIdx2 = 0; yLine = fArea.y;
+      }
+      // 把一条已经分好行的字符数组落成 token（行首缩进/行末悬挂开括号在此处理，与渲染位置一致）
+      function emitLine(w) {
+        var ind = w.indent ? indent : 0;
+        var xs = fArea.x + ind;
+        var content = w.items;
+        var hanger = '';   // 行尾悬挂的开括号（只有它单独成段时才不悬挂）
+        while (content.length > 1 && isNoLineEnd(content[content.length - 1].ch)) hanger = content.pop().ch + hanger;
+        var lh = lineHeightOf(content.map(function (o) { return o.ch; }).join('') + hanger);
+        // 这一行放不下（超出调整框底）→ 先换页（当前页非空才换；空页时硬放，防止框比一行还矮时死循环）
+        if (page2.tokens.length && yLine + lh > fArea.y + fArea.h + 0.01) newFlowPage();
+        var by = yLine + lh * 0.76;
+        var x = xs;
+        for (var q = 0; q < content.length; q++) {
+          var o = content[q];
+          if (o.ch !== ' ' && o.ch !== '\t') {
+            page2.tokens.push({ ch: o.ch, x: x, y: by, size: o.full ? fsMm : enFsMm, adv: o.advT, full: o.full, line: lineIdx2, offDx: 0, offDy: 0, __lineSize: fsMm });
+          }
+          x += o.advT;
+        }
+        for (var h = 0; h < hanger.length; h++) {   // 悬挂的开括号：贴到右界外一点
+          page2.tokens.push({ ch: hanger[h], x: fArea.x + fArea.w + fsMm * 0.1 + h * fsMm, y: by, size: fsMm, adv: fsMm, full: true, line: lineIdx2, offDx: 0, offDy: 0, __lineSize: fsMm });
+        }
+        lineIdx2++; yLine += lh;
       }
       newFlowPage();
       for (var pIdx = 0; pIdx < paras.length; pIdx++) {
         var chars = Array.from(paras[pIdx]);
-        xcur = area.x + indent;
-        for (var ci = 0; ci < chars.length; ci++) {
+        var line = { items: [], w: 0, indent: true };   // 段首缩进两字，换行后不再缩进
+        var ci = 0;
+        while (ci < chars.length) {
           var ch2 = chars[ci];
-          // 归属：CJK + 全套中文标点 → 中文字体；ASCII 拉丁/数字 → 英文字体。
           var full = isCnChar(ch2.codePointAt(0), ch2);
-          // 中文用中文字体测量、英文用英文字体测量（两套字体分开选）
-          // 英文/数字：占位宽度按真实字形宽度（拉丁文更紧凑），但「渲染字号」固定为 fsMm——
-          // 之前直接把宽度当作字号传下去，导致英文字号缩到中文的一半，一换纸张看着就变小。
           var mf = full ? currentFamilyCn : currentFamilyEn;
           var adv = full ? fsMm : Math.max(widthFactor(ch2, mf) * enFsMm, enFsMm * 0.30);
-          var advT = adv + (full ? tcn2 : ten2);   // 含逐字间距的推进量
-          // 换行判断（标点悬挂：行首禁则允许略超右界）
-          if (xcur + advT > rightLimit && xcur > area.x + indent + fsMm * 0.5) {
-            if (!isNoLineStart(ch2)) {
-              var prev = page2.tokens.length ? page2.tokens[page2.tokens.length - 1].ch : '';
-              if (isNoLineEnd(prev)) {
-                // 避尾：把前一个开括号挪到新行
-                page2.tokens.pop();
-                lineIdx++;
-                if (lineIdx >= linesPerPage) newFlowPage();
-                else xcur = area.x + indent;
-                xcur = area.x + indent;
-                page2.tokens.push({ ch: prev, x: xcur, y: area.y + lineIdx * lineH + lineH * 0.76, size: fsMm, adv: fsMm, full: true, line: lineIdx, offDx: 0, offDy: 0, __lineSize: fsMm });
-                xcur += fsMm + tcn2;
-              } else {
-                lineIdx++;
-                if (lineIdx >= linesPerPage) newFlowPage();
-                else xcur = area.x + indent;
-              }
+          var advT = adv + (full ? tcn2 : ten2);
+          var indW = line.indent ? indent : 0;
+          var avail = fArea.w - indW;
+          // 英文整词换行：词内字符、本行已有内容、放不下 → 把该词整段挪到下一行（绝不从词中间截断）
+          if (isWordChar(ch2) && line.items.length && isWordChar(line.items[line.items.length - 1].ch) && line.w + advT > avail) {
+            var b = line.items.length;
+            while (b > 0 && isWordChar(line.items[b - 1].ch)) b--;
+            if (b > 0) {                         // 本行确实有内容 → 词整体下移
+              var word = line.items.splice(b), ww = 0;
+              for (var wi = 0; wi < word.length; wi++) ww += word[wi].advT;
+              emitLine({ items: line.items, indent: line.indent });
+              line = { items: word, w: ww, indent: false };
+              continue;
             }
           }
-          var by = area.y + lineIdx * lineH + lineH * 0.76;
-          page2.tokens.push({ ch: ch2, x: xcur, y: by, size: full ? fsMm : enFsMm, adv: advT, full: full, line: lineIdx, offDx: 0, offDy: 0, __lineSize: fsMm });
-          xcur += advT;
+          // 放不下 → 换行（标点悬挂：行首禁则允许略超右界）
+          if (line.w + advT > avail && !isNoLineStart(ch2) && line.items.length) {
+            emitLine({ items: line.items, indent: line.indent });
+            line = { items: [], w: 0, indent: false };
+            continue;
+          }
+          line.items.push({ ch: ch2, full: full, advT: advT });
+          line.w += advT;
+          ci++;
         }
-        // 段落结束 → 换行
-        lineIdx++;
-        if (lineIdx >= linesPerPage && pIdx < paras.length - 1) newFlowPage();
-        else xcur = area.x + indent;
+        if (line.items.length) emitLine({ items: line.items, indent: line.indent });
       }
       if (page2 && page2.tokens.length) pages.push(page2);
     }
@@ -1096,6 +1187,14 @@
     buildPDF: buildPDF,
     mm2px: mm2px,
     pageSize: pageSize,
-    _internals: { wrapTokens: wrapTokens, isFullWidth: isFullWidth, isCnChar: isCnChar, areaOf: areaOf }
+    // 默认排版区域（mm）+ 是否支持「整篇形状调整」（格子纸用印刷格，不支持）
+    areaOf: areaOf,
+    supportsFlowBox: function (paper) { return !!paper && paper.kind !== 'grid'; },
+    // 当前整篇调整框（mm）；没调过返回默认排版区域
+    flowBoxOf: function (paper, opts) {
+      var a = areaOf(paper, opts || {});
+      return flowBounds(paper, opts || {}, a) || { x: a.x, y: a.y, w: a.w, h: a.h };
+    },
+    _internals: { wrapTokens: wrapTokens, wrapTokensWord: wrapTokensWord, isFullWidth: isFullWidth, isCnChar: isCnChar, areaOf: areaOf, flowBounds: flowBounds }
   };
 })(typeof window !== 'undefined' ? window : globalThis);
