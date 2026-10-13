@@ -1070,6 +1070,68 @@
     return canvas;
   }
 
+  /* ================= 「整篇形状拖动」廉价预览 =================
+   * 拖版面框时每次重排都会改变换行/分页，若每帧走 buildPageCache（逐字建离屏 + getImageData 锐化）
+   * 一帧要上百毫秒 → 卡顿、不跟手。这里只做「纸面 blit（复用外部缓存）+ 纯 fillText 字形」的轻量整页重绘：
+   * 不做离屏、不做锐化/颗粒/描边，位置/字号/逐行漂移与全质量稿同序，松手后重建即定稿。
+   * 只用于拖动过程中，绝不用来导出。 */
+  function renderReflowPreview(canvas, layoutRes, pageIdx, cfg, dpi, paperCanvas) {
+    var page = layoutRes.pages[pageIdx];
+    var area = page.area;
+    var W = Math.round(mm2px(area.pageW, dpi)), H = Math.round(mm2px(area.pageH, dpi));
+    if (canvas.width !== W) canvas.width = W;
+    if (canvas.height !== H) canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    if (paperCanvas) ctx.drawImage(paperCanvas, 0, 0);
+    else { var rng0 = RNG.makeRng('page:' + layoutRes.seed + ':' + pageIdx); paintPaper(ctx, page, dpi, rng0); }
+
+    var gx = (cfg.textOffset && cfg.textOffset.dx) || 0;
+    var gy = (cfg.textOffset && cfg.textOffset.dy) || 0;
+    var pageH = layoutRes.area.pageH;
+    var messy = cfg.messyRatio / 100;
+    var nP = layoutRes.pages.length;
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'center';
+    var lastFont = '';
+    for (var sp = 0; sp < nP; sp++) {
+      var src = layoutRes.pages[sp];
+      var shiftY = (sp - pageIdx) * pageH;
+      var isHome = (sp === pageIdx);
+      var sRng = RNG.makeRng('page:' + layoutRes.seed + ':' + sp);
+      var sDrng = RNG.makeRng('drift:' + layoutRes.seed + ':' + sp);
+      var showOther = !isHome && (!!gy);
+      var lineMap = {};
+      for (var i = 0; i < src.tokens.length; i++) {
+        var tk = src.tokens[i];
+        var k = (tk.line === undefined ? 'x' : tk.line);
+        var d = lineMap[k];
+        if (!d) {
+          d = lineMap[k] = {
+            dy: gauss(sDrng) * messy * (tk.size || 5) * 0.14,
+            dx: gauss(sDrng) * messy * (tk.size || 5) * 0.06,
+            alpha: 1 - Math.min(0.16, Math.abs(gauss(sDrng)) * messy * 0.05)
+          };
+          d.show = isHome || showOther || !!tk.offDy;
+        }
+        if (!d.show) continue;
+        var code = tk.ch.codePointAt(0);
+        var isCJK = isCnChar(code, tk.ch);
+        var family = isCJK ? (cfg.familyCn || cfg.family) : (cfg.familyEn || cfg.family);
+        var sizePx = mm2px(tk.size, dpi);
+        var jx = d.dx + gauss(sRng) * messy * sizePx * 0.11 + mm2px(tk.ox || 0, dpi);
+        var jy = d.dy + gauss(sRng) * messy * sizePx * 0.22 + mm2px(tk.oy || 0, dpi);
+        var ink = inkColorFor(cfg.inkColor, sRng, cfg.inkJitter, cfg.inkPressure);
+        var f = inkFont(sizePx, family, cfg.bold);
+        if (f !== lastFont) { ctx.font = f; lastFont = f; }
+        ctx.fillStyle = ink.css;
+        ctx.fillText(tk.ch, mm2px(tk.x, dpi) + jx, mm2px(tk.y + shiftY, dpi) + jy + mm2px(gy, dpi));
+      }
+    }
+    return canvas;
+  }
+
   /* ================= 零依赖 PDF 导出 ================= */
   // 把若干张 canvas（每页）打包成一个 PDF。使用 JPEG 压缩以控制体积。
   function canvasToJpegBytes(canvas, quality) {
@@ -1174,10 +1236,20 @@
       cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
       return buildPageCache(res, pageIdx, cfg, dpi);
     },
+    // 只画纸面（不含字）——供「整篇形状拖动」时的快速预览复用
+    buildPaper: function (res, pageIdx, cfg, dpi) {
+      return buildPaper(res, pageIdx, cfg, dpi);
+    },
     renderWithCache: function (canvas, res, pageIdx, cfg, dpi, cache, cacheFor) {
       cfg.familyCn = cfg.familyCn || currentFamilyCn || HW.render._lastFamilyCn;
       cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
       return renderWithCache(canvas, res, pageIdx, cfg, dpi, cache, cacheFor);
+    },
+    // 「整篇形状拖动」时的廉价整页预览：纸面 blit（可传已建好的纸画布）+ 纯 fillText。绝不用于导出。
+    renderReflowPreview: function (canvas, res, pageIdx, cfg, dpi, paperCanvas) {
+      cfg.familyCn = cfg.familyCn || currentFamilyCn || HW.render._lastFamilyCn;
+      cfg.familyEn = cfg.familyEn || currentFamilyEn || HW.render._lastFamilyEn || cfg.familyCn;
+      return renderReflowPreview(canvas, res, pageIdx, cfg, dpi, paperCanvas);
     },
     pagePixelSize: function (paper, dpi) {
       var a = areaOf(paper, {});

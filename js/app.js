@@ -231,6 +231,7 @@
       if (mx * mx + my * my < 9) return;
       flowDrag.moved = true; pushUndo();   // 形状改动也进撤回历史（拖动只记一步）
     }
+    flowPreviewing = true;   // 拖动中一律走廉价预览（纸 blit + 纯 fillText），保证跟手
     _flowEvt = e;
     if (_flowRaf) return;   // 重排较贵：一帧最多重排一次
     _flowRaf = requestAnimationFrame(function () {
@@ -245,9 +246,9 @@
     try { document.body.classList.remove('flow-resizing'); } catch (err) { }
     if (_flowRaf) { cancelAnimationFrame(_flowRaf); _flowRaf = 0; }
     var d = flowDrag;
-    if (d && d.moved && _flowEvt) updateFlowDrag(_flowEvt);   // 保证末次位置一定落定（rAF 被节流时也不丢）
+    flowPreviewing = false;   // 松手：恢复全质量（末次重排走全质量路径，重建逐字缓存一次）
+    if (d && d.moved) { if (_flowEvt) updateFlowDrag(_flowEvt); else relayoutFlow(); }   // 末次位置落定
     flowDrag = null;
-    if (d && d.moved) relayoutFlow();   // 松手：用最后位置重排 + 重画把手
   }
   // 整篇形状拖动：改版面框；每次改动都用新框重排（框内快速重画）
   function updateFlowDrag(e) {
@@ -298,6 +299,24 @@
   }
   // 取「任意页」的缓存（跨页绘制时用：把拖到别的页的行也画出来）
   function cacheFor(pi) { return pageCache(pi); }
+
+  // 「整篇形状拖动」时的纸面缓存：纸不含字、与字号/换行无关，拖一整轮只建一次，之后每帧 blit 复用。
+  var flowPaper = { sig: '', cvs: [] };
+  function pagePaper(pi) {
+    var c = renderCfg();
+    var sig = [lastLayout ? lastLayout.seed : '', previewDpi, c.pageNumber, cfg.paperId,
+      c.customImage ? (c.customImage.width + 'x' + c.customImage.height) : ''].join('|');
+    if (sig !== flowPaper.sig) flowPaper = { sig: sig, cvs: [] };
+    if (!flowPaper.cvs[pi]) flowPaper.cvs[pi] = R.buildPaper(lastLayout, pi, c, previewDpi);
+    return flowPaper.cvs[pi];
+  }
+  // 拖动中的廉价整页重绘：纸 blit + 纯 fillText，不建逐字缓存（不碰 getImageData），保证跟手。
+  function renderFlowPreview(pi) {
+    var cv = lastPages[pi]; if (!cv) return;
+    R.renderReflowPreview(cv, lastLayout, pi, renderCfg(), previewDpi, pagePaper(pi));
+  }
+  // 是否处于「整篇形状拖动中」→ 走廉价预览；松手即置回 false，末次落定走全质量路径。
+  var flowPreviewing = false;
 
   /* ---------------- 撤回 / 重做（前后各 10 步） ----------------
    * 快照只存「调整状态」：整篇偏移 textOffset + 各行偏移。锚点用 token 原始坐标(rawX/rawY)，
@@ -409,8 +428,42 @@
     lastLayout = R.layout(rawText, p, collectOpts(), fams);
     pageCaches = []; lastCacheSig = '';
     if (oldN !== lastLayout.pages.length) buildPagesDOM();
-    redrawAll();
-    refreshSel();
+    if (flowPreviewing) {
+      // 拖动中：只在版面框内重排（~0.1ms），整页用「纸 blit + 纯 fillText」廉价重绘，不建逐字缓存 → 跟手。
+      // 覆盖层用「原地改样式」，不重建 DOM（重建会让正按着的把手被移除，安卓上直接 pointercancel 断触）。
+      for (var i = 0; i < lastPages.length; i++) renderFlowPreview(i);
+      liveFlowHighlight();
+    } else {
+      redrawAll();
+      refreshSel();
+    }
+  }
+  // 拖动中原地更新覆盖层（只改样式，不动 DOM）：版面框 + 整篇包围盒。
+  function liveFlowHighlight() {
+    var ov = overlays[0];
+    if (!ov || !lastLayout || !lastLayout.pages[0]) return;
+    var page = lastLayout.pages[0];
+    var area = page.area || lastLayout.area;
+    var w = ov.clientWidth; if (!w) return;
+    var pxPerMm = w / area.pageW;
+    var el = ov.querySelector('.flow-box');
+    if (el) {
+      var fb = R.flowBoxOf(curPaper(), collectOpts());
+      el.style.left = (fb.x * pxPerMm) + 'px';
+      el.style.top = (fb.y * pxPerMm) + 'px';
+      el.style.width = (fb.w * pxPerMm) + 'px';
+      el.style.height = (fb.h * pxPerMm) + 'px';
+    }
+    var blk = ov.querySelector('.line-box.block');
+    if (blk) {
+      var pb = pageBBox(page);
+      if (pb) {
+        blk.style.left = (pb.x0 * pxPerMm) + 'px';
+        blk.style.top = (pb.y0 * pxPerMm) + 'px';
+        blk.style.width = ((pb.x1 - pb.x0) * pxPerMm) + 'px';
+        blk.style.height = ((pb.y1 - pb.y0) * pxPerMm) + 'px';
+      }
+    }
   }
   function undo() {
     if (!undoStack.length) { toast('没有可撤回的调整', 'err'); return; }
