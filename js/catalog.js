@@ -190,7 +190,7 @@
 
   /* 应用版本号（单一出处）：更新检查拿它跟 GitHub 最新 Release 比。
    * 发新版时改这里 + package.json 的 version + launcher/App.cs 的 AppVer。 */
-  root.HW.appVersion = '1.3.3';
+  root.HW.appVersion = '1.3.4';
 
   /* 用户对纸张的增删记录（app.js 读它、改 PAPERS，再写回 localStorage）：
    *   removed: [内置纸张 id]         —— 被删掉的内置纸
