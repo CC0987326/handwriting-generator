@@ -32,6 +32,9 @@ import java.util.ArrayList;
 public class WebBridge {
 
     private static final String TAG = "HW-Bridge";
+    // 专用单线程：热更下载耗时且可能几分钟，不能占用 WebView 的 JavaBridge 线程（会串死其它桥调用）
+    private static final java.util.concurrent.ExecutorService UPDATE_EXEC =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
     private final MainActivity act;
     private final WebView web;
     private final File liveRoot;
@@ -117,14 +120,15 @@ public class WebBridge {
         }
     }
 
-    /** 热更新：下载并切换网页包。后台线程执行，完毕后回调网页。 */
+    /** 热更新：下载并切换网页包。放独立单线程执行器，别占用 WebView 的 JavaBridge 线程。 */
     @JavascriptInterface
     public void installUpdate(final String zipUrl, final String version) {
-        new Thread(new Runnable() {
+        UPDATE_EXEC.execute(new Runnable() {
             @Override public void run() {
                 final String err = UpdateManager.install(liveRoot, zipUrl, version);
                 act.runOnUiThread(new Runnable() {
                     @Override public void run() {
+                        if (act.isFinishing() || act.isDestroyed()) return;   // Activity 已销毁：别回网页/重载
                         if (err == null) {
                             callback("update", true, "");
                             act.reloadApp();
@@ -134,7 +138,7 @@ public class WebBridge {
                     }
                 });
             }
-        }).start();
+        });
     }
 
     /** 启动成功确认（撤销看门狗回滚标记）。 */
@@ -167,6 +171,7 @@ public class WebBridge {
     public void print() {
         act.runOnUiThread(new Runnable() {
             @Override public void run() {
+                if (web == null || act.isFinishing() || act.isDestroyed()) return;
                 try {
                     PrintManager pm = (PrintManager) act.getSystemService(Context.PRINT_SERVICE);
                     String job = act.getPackageName() + " 手写稿";

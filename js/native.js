@@ -54,29 +54,41 @@
    * 页面→宿主： "p\t<id>\t<张数>\t<首文件名>"   选目标（1 张弹保存框，多张弹选文件夹）
    *             "w\t<id>\t<文件名>\t<base64>"    写入一个文件
    * 宿主→页面： "ok\t<id>\t<路径或文件名>" / "no\t<id>" / "err\t<id>\t<原因>"
-   * 用字符串 + 制表符分列，避开 JSON 序列化大块 base64 的开销。 */
-  function wvBackend() {
-    var seq = 0, pending = {};
+   * 用字符串 + 制表符分列，避开 JSON 序列化大块 base64 的开销。
+   * 监听器仅在模块加载时注册一次、pending 表全模块共享：否则每次导出都叠一层监听器，
+   * 长期使用会无限累积（且旧监听器会收到广播、闭包常驻）。 */
+  var wvPending = {}, wvSeq = 0;
+  if (wv && window.chrome && window.chrome.webview.addEventListener) {
     window.chrome.webview.addEventListener('message', function (ev) {
       var p = String(ev.data == null ? '' : ev.data).split('\t');
-      var cb = pending[p[1]];
-      if (cb) { delete pending[p[1]]; cb(p); }
+      var cb = wvPending[p[1]];
+      if (cb) { delete wvPending[p[1]]; cb(p); }
     });
-    function rpc(type, args) {                       // args 数组，可省略
-      var id = 'r' + (++seq);
-      var line = type + '\t' + id + (args && args.length ? '\t' + args.join('\t') : '');
-      return new Promise(function (res) { pending[id] = res; window.chrome.webview.postMessage(line); });
-    }
+  }
+  function wvRpc(type, args, timeoutMs) {           // args 数组，可省略
+    var id = 'r' + (++wvSeq);
+    var line = type + '\t' + id + (args && args.length ? '\t' + args.join('\t') : '');
+    return new Promise(function (res, rej) {
+      // 宿主不回消息（关框静默、base64 过大被丢）时不能永久悬着 —— 超时即报错复位 UI
+      var to = setTimeout(function () {
+        delete wvPending[id]; rej(new Error('宿主无响应（超时）'));
+      }, timeoutMs || 60000);
+      wvPending[id] = function (p) { clearTimeout(to); res(p); };
+      try { window.chrome.webview.postMessage(line); }
+      catch (e) { clearTimeout(to); delete wvPending[id]; rej(e); }
+    });
+  }
+  function wvBackend() {
     return {
       begin: function (count, firstName) {
-        return rpc('p', [String(count), firstName]).then(function (p) {
+        return wvRpc('p', [String(count), firstName]).then(function (p) {
           if (p[0] !== 'ok') return null;            // no / err 一律当取消
           return { label: p[2] || '' };
         });
       },
       write: function (ctx, name, blob) {
         return blobToB64(blob).then(function (b64) {
-          return rpc('w', [name, b64]).then(function (p) {
+          return wvRpc('w', [name, b64], 120000).then(function (p) {   // 大图写入给更宽超时
             if (p[0] !== 'ok') throw new Error(p[2] || '写入失败');
           });
         });
@@ -170,13 +182,13 @@
 
   function run(backend, items, renderFn, onProgress, onCtx) {
     // begin 必须同步发起：浏览器「文件系统访问 API」要求选路径发生在用户点击手势内。
-    var ctxP, ctxRef = null;
+    var ctxP, ctxRef = null, began = false;
     try { ctxP = Promise.resolve(backend.begin(items.length, items[0].name)); }
     catch (e) { ctxP = Promise.reject(e); }
     return ctxP
       .then(function (ctx) {
         if (!ctx) return { canceled: true };
-        ctxRef = ctx;
+        ctxRef = ctx; began = true;
         var i = 0;
         function step() {
           if (i >= items.length) return { ok: true, label: ctx.label, count: items.length };
@@ -192,7 +204,8 @@
         return step();
       })
       .then(function (r) { if (backend.end) { try { backend.end(); } catch (e) { } } return r; })
-      .then(function (r) { if (onCtx && ctxRef) { try { onCtx(ctxRef); } catch (e) { } } return r; });
+      .then(function (r) { if (onCtx && ctxRef) { try { onCtx(ctxRef); } catch (e) { } } return r; })
+      .catch(function (err) { err._hwBegan = began; throw err; });   // 标记「是否已开始写」供兜底判断
   }
 
   HW.native = {
@@ -213,8 +226,9 @@
       }).catch(function (err) {
         var name = err && err.name;
         if (name === 'AbortError') return { canceled: true };
-        // 文件系统访问 API 在 file:// 等场景不可用 → 静默回退传统下载
-        if (b.canFallback && (name === 'SecurityError' || name === 'NotAllowedError' || name === 'TypeError')) {
+        // 文件系统访问 API 在 file:// 等场景不可用 → 静默回退传统下载。
+        // 仅当「还没开始写任何文件」时回退：若已写到一半才失败，重跑会从第 0 张重导、与已落盘的部分重复。
+        if (b.canFallback && !err._hwBegan && (name === 'SecurityError' || name === 'NotAllowedError' || name === 'TypeError')) {
           return run(dlBackend(), items, renderFn, onProgress).then(function (r) {
             r.fallback = true; return r;
           });

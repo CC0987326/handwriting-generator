@@ -14,6 +14,7 @@
   /* ---------------- 纸张增删存 ---------------- */
   // 用户对内置纸张的增删记录；启动时套用到 CAT.PAPERS 上
   var paperStore = { removed: [], custom: [] };
+  var sessionPapers = [];   // 仅本次会话的上传纸张（objectURL 底图，不持久化，避免下次启动变成打不开的空壳）
   var customImages = {};    // id -> Image（当前会话内已解码的自定义纸张底图）
   var moreOpen = false;     // 「更多纸张」是否展开
 
@@ -50,6 +51,7 @@
     });
     keep.forEach(function (p) { p.builtin = true; p.removable = true; });   // 内置纸：可删，删了能加回
     paperStore.custom.forEach(function (p) { p.user = true; p.removable = true; keep.push(p); });
+    sessionPapers.forEach(function (p) { p.user = true; p.removable = true; keep.push(p); });   // 仅本次会话的上传纸
     var self = BASE_PAPERS.filter(function (p) { return p.id === 'custom'; })[0];
     if (self) keep.push(self);   // 末尾保留「自定义背景(上传图片)」作为添加入口
     CAT.PAPERS.length = 0;
@@ -969,6 +971,7 @@
       if (paperStore.removed.indexOf(p.id) < 0) paperStore.removed.push(p.id);
     } else {
       for (var j = 0; j < paperStore.custom.length; j++) if (paperStore.custom[j].id === p.id) { paperStore.custom.splice(j, 1); }
+      for (var sj = 0; sj < sessionPapers.length; sj++) if (sessionPapers[sj].id === p.id) { sessionPapers.splice(sj, 1); }
       var nx = []; for (var k = 0; k < CAT.PAPERS.length; k++) if (CAT.PAPERS[k].id !== p.id) nx.push(CAT.PAPERS[k]);
       CAT.PAPERS.length = 0; Array.prototype.push.apply(CAT.PAPERS, nx);
       delete customImages[p.id];
@@ -1039,7 +1042,8 @@
     el.value = cfg[key] || 1;
     out.textContent = (+el.value).toFixed(2) + '×';
     el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(2) + '×'; };
-    el.onchange = function () { if (lastPages.length) redrawAll(); };
+    // sizeCn/sizeEn 在layout阶段写进每个 token 的 size，属「需重新排版」参数 → 只能用 doPreview（redrawAll 命中旧缓存不更新）。
+    el.onchange = function () { if (lastPages.length && !busy) doPreview(); };
   }
   // 中/英笔画粗细滑块（负 = 更细，0 = 标准，正 = 更粗）
   function weightLabel(v) { v = +v; return v === 0 ? '标准' : (v > 0 ? ('+' + v) : String(v)); }
@@ -1212,7 +1216,7 @@
       if (r && r.error) { toast('导出失败：' + r.error, 'err'); return; }
       var where = (r && r.label) ? '：' + r.label : '';
       toast('已导出 ' + idxs.length + ' 张' + (r && r.fallback ? '（浏览器下载文件夹）' : where), 'ok');
-    });
+    }).catch(function (e) { toast('导出失败：' + (e && e.message || e), 'err'); });
   }
 
   /* ---------------- 导出预览图（所见即所得） ----------------
@@ -1241,7 +1245,7 @@
       if (r && r.error) { toast('导出失败：' + r.error, 'err'); return; }
       var where = (r && r.label) ? '：' + r.label : '';
       toast('已导出 ' + items.length + ' 张预览图' + (r && r.fallback ? '（浏览器下载文件夹）' : where), 'ok');
-    });
+    }).catch(function (e) { toast('导出失败：' + (e && e.message || e), 'err'); });
   }
 
   /* ---------------- 导出 PDF ---------------- */
@@ -1259,6 +1263,10 @@
     var area = lastLayout.area;
     var name = '手写稿_' + stamp() + '.pdf';
     var data = [], i = 0;
+    function fail(e) {   // 任何一步抛错都要复位 busy/进度条，否则界面永久卡在「正在生成 PDF…」
+      bar.remove(); busy = false;
+      toast('生成 PDF 失败：' + (e && e.message || e), 'err');
+    }
     function finish(blob) {
       var done = function (r) {
         bar.remove(); busy = false;
@@ -1267,23 +1275,25 @@
         var where = (r && r.label) ? '：' + r.label : '';
         toast('PDF 已保存' + (r && r.fallback ? '（浏览器下载文件夹）' : where), 'ok');
       };
-      if (HW.native) HW.native.exportAll([{ name: name }], function () { return blob; }).then(done);
+      if (HW.native) HW.native.exportAll([{ name: name }], function () { return blob; }).then(done).catch(fail);
       else { download(blob, name); done({}); }
     }
     function step() {
-      if (i >= N) {
-        finish(R.buildPDF(data, area.pageW, area.pageH));
-        return;
-      }
-      var cv = document.createElement('canvas');
-      R.renderPage(cv, lastLayout, i, renderCfg(), dpi);
-      var jpeg = R.canvasToJpegBytes(cv, 0.86);
-      data.push({ jpeg: jpeg, w: cv.width, h: cv.height });
-      i++;
-      $('#pg2') && ($('#pg2').style.width = (3 + i / N * 94) + '%');
-      // 释放画布
-      cv.width = cv.height = 0;
-      requestAnimationFrame(function () { setTimeout(step, 0); });
+      try {
+        if (i >= N) {
+          finish(R.buildPDF(data, area.pageW, area.pageH));
+          return;
+        }
+        var cv = document.createElement('canvas');
+        R.renderPage(cv, lastLayout, i, renderCfg(), dpi);
+        var jpeg = R.canvasToJpegBytes(cv, 0.86);
+        data.push({ jpeg: jpeg, w: cv.width, h: cv.height });
+        i++;
+        $('#pg2') && ($('#pg2').style.width = (3 + i / N * 94) + '%');
+        // 释放画布
+        cv.width = cv.height = 0;
+        requestAnimationFrame(function () { setTimeout(step, 0); });
+      } catch (e) { fail(e); }
     }
     step();
   }
@@ -1398,8 +1408,8 @@
             toast('长期保存失败（本地空间不足），本次仍可使用', 'err');
           }
         }
-        // 仅本次会话：保留 objectURL
-        paperStore.custom.push(paper);
+        // 仅本次会话：保留 objectURL（不写进 paperStore.custom，否则下次启动会变成无底图的空壳纸）
+        sessionPapers.push(paper);
         customImages[id] = img;
         savePaperStore();
         applyPaperStore();
@@ -1476,6 +1486,8 @@
       if (i >= urls.length) return Promise.reject(new Error('所有 CDN 均不可用'));
       return loadOne(urls[i]).catch(function () { return tryAt(i + 1); });
     })(0);
+    // 失败不缓存：否则本会话内再导入会一直命中同一个 rejected promise，网络恢复也不重试其它 CDN
+    _loadedScripts[key].catch(function () { delete _loadedScripts[key]; });
     return _loadedScripts[key];
   }
   var CDN = {
@@ -1713,7 +1725,6 @@
     // 示例内容改成「半隐式提示」：以 placeholder 呈现，用户一点框开始输入就自动覆盖，
     // 不必再手动清空。（placeholder 不属于 value，不会被生成、也不会进字符统计）
     $('#text').placeholder = '把要写成手写的文字粘在这里（也可以导入 Word / 图片）。\n\n例：\n语文作业：请同学们认真抄写下面的段落，注意书写工整，标点符号要占格。\n\n春天来了，万物复苏。小草偷偷地从土里钻出来，嫩嫩的，绿绿的。\n\nEnglish Practice: Spring is coming, and everything comes back to life. Let us read the passage aloud.';
-    refreshStatus();
     refreshStatus();
     setTimeout(doPreview, 200);
   }

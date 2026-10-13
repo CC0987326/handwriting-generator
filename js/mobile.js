@@ -57,8 +57,12 @@
     }
   };
 
-  /* ---------- 致命错误 → 通知原生回滚（热更包把页面搞崩时救场） ---------- */
+  /* ---------- 致命错误 → 通知原生回滚（热更包把页面搞崩时救场） ----------
+   * 只在「启动确认前」上报：一旦 bootOk 已经告诉原生启动成功，后续任何运行时错误
+   * （导出异常、第三方库抛错等）都与热更包无关，不能再去触发看门狗回滚，否则会把好版本换掉。 */
+  var bootOkSent = false;
   window.addEventListener('error', function () {
+    if (bootOkSent) return;
     try { if (android && android.bootFail) android.bootFail(); } catch (e) { }
   });
 
@@ -165,7 +169,10 @@
     setTimeout(injectExportFold, 0);
     setTimeout(injectMastheadFold, 0);
     // 首屏逻辑跑通 → 告诉原生「本次启动成功」，撤销看门狗回滚标记
-    setTimeout(function () { try { if (android && android.bootOk) android.bootOk(); } catch (e) { } }, 1200);
+    setTimeout(function () {
+      bootOkSent = true;
+      try { if (android && android.bootOk) android.bootOk(); } catch (e) { }
+    }, 1200);
   });
 
   HW.mobile = { share: shareLast };

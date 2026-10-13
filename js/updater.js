@@ -65,18 +65,27 @@
     return PRIMARY_MIRROR + url;
   }
 
+  // 打开外链。返回是否已成功交给外部打开。
+  // 注意：绝不 fallback 到 location.href —— 那会把正在编辑的界面整个导航走、丢失内容。
   function openExternal(url) {
-    // Android 外壳：window.open 会被 WebView 拦，退回 location.href 又会把界面本身导航走，
-    // 必须走原生 Intent 交给系统浏览器。
+    // Android 外壳：window.open 会被 WebView 拦，必须走原生 Intent 交给系统浏览器。
     if (window.HWAndroid && window.HWAndroid.openExternal) {
-      try { window.HWAndroid.openExternal(url); return; } catch (e) { }
+      try { window.HWAndroid.openExternal(url); return true; } catch (e) { }
     }
-    // 浏览器/WebView2 弹新窗口；Electron 的 setWindowOpenHandler 会转 system browser
+    // 浏览器/WebView2 弹新窗口；Electron 的 setWindowOpenHandler 会转 system browser。
+    // noopener：防止被打开的远端页面（j.html_url 来自镜像数据）经 window.opener 反操作本页。
     try {
-      var w = window.open(url, '_blank');
-      if (w) return;
+      var w = window.open(url, '_blank', 'noopener,noreferrer');
+      if (w) return true;
     } catch (e) { }
-    try { location.href = url; } catch (e) { }
+    // 弹窗被拦：用临时 <a target=_blank> 再试一次（不导航走当前应用）
+    try {
+      var a = document.createElement('a');
+      a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      document.body.appendChild(a); a.click(); a.remove();
+      return true;
+    } catch (e) { }
+    return false;
   }
 
   // 并发竞速拉 JSON：直连 + 所有镜像同时发，谁先返回有效结果用谁，其余 abort。
@@ -109,11 +118,13 @@
     });
   }
 
-  // 探测某个下载 URL 哪些镜像可连（no-cors：只要能建立连接就算通），竞速取最快。
-  // 拿到响应头即 resolve → 立即 abort 掉后续传输，不会真把整包下完。
+  // 探测某个下载 URL 哪些镜像可连，竞速取最快。
+  // 用 Range: bytes=0-0 只请求 1 字节（no-cors 读不到 status，但能建立连接即算通），
+  // 避免此前对同一个 zip 并发发 5 路「整包下载」探测（白白耗流量、易被免费镜像限流）。
+  // 返回 '' 表示全都探测失败（调用方不要再用「已知不可达」的前缀兜底）。
   function pickDownloadUrl(url) {
     return new Promise(function (resolve) {
-      if (typeof fetch !== 'function') { resolve(mirrorDownload(url)); return; }
+      if (typeof fetch !== 'function') { resolve(url); return; }
       var urls = mirrorUrls(url);
       var pending = urls.length, settled = false, ctrls = [];
       function win(u) {
@@ -123,7 +134,7 @@
       }
       function lose() {
         if (settled) return;
-        if (--pending <= 0) { settled = true; resolve(''); }   // 全不通：调用方回退兜底前缀
+        if (--pending <= 0) { settled = true; resolve(''); }   // 全不通
       }
       urls.forEach(function (u) {
         var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
@@ -131,7 +142,8 @@
         var t = setTimeout(function () {
           if (ctrl) { try { ctrl.abort(); } catch (e) { } } else lose();
         }, PROBE_TIMEOUT);
-        fetch(u, { method: 'GET', mode: 'no-cors', cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+        fetch(u, { method: 'GET', mode: 'no-cors', cache: 'no-store',
+                   headers: { 'Range': 'bytes=0-0' }, signal: ctrl ? ctrl.signal : undefined })
           .then(function () { clearTimeout(t); win(u); })
           .catch(function () { clearTimeout(t); lose(); });
       });
@@ -172,7 +184,7 @@
     go.textContent = '去下载';
     go.style.cssText = 'flex:1;padding:8px 12px;border:0;border-radius:9px;cursor:pointer;' +
       'background:#4f7cff;color:#fff;font-weight:600;font-size:13px';
-    go.onclick = function () { openExternal(url); store(DISMISS_KEY, latest); box.remove(); };
+    go.onclick = function () { if (openExternal(url)) { store(DISMISS_KEY, latest); box.remove(); } };
     var later = document.createElement('button');
     later.textContent = '以后再说';
     later.style.cssText = 'padding:8px 12px;border:1px solid #3a4256;border-radius:9px;cursor:pointer;' +
@@ -205,15 +217,17 @@
         var zip = webZipUrl(j);
         if (zip) {
           store(DISMISS_KEY, j.tag_name || j.name);        // 热更静默进行，不再弹卡片
-          // 下载也走镜像兜底：探测出能连的镜像 URL，交给原生 UpdateManager 下载
+          // 探测出能连的镜像 URL 再交给原生下载；全探测失败时把**原始链接**交出去
+          // （原生 UpdateManager 自带镜像兜底，别在这里塞一个「已知不可达」的前缀）。
           pickDownloadUrl(zip).then(function (u) {
-            try { an.installUpdate(u || mirrorDownload(zip), lv.join('.')); } catch (e) { }
+            try { an.installUpdate(u || zip, lv.join('.')); } catch (e) { }
           });
           return;
         }
         var apk = apkUrl(j);
         if (apk) {
-          pickDownloadUrl(apk).then(function (u) { card(cur, j.tag_name || j.name, u || mirrorDownload(apk)); });
+          // APK 下载走系统浏览器：探测能连的镜像，探测失败则用原始 GitHub 页（用户可自备代理）
+          pickDownloadUrl(apk).then(function (u) { card(cur, j.tag_name || j.name, u || (j.html_url || PAGE)); });
           return;
         }
       }

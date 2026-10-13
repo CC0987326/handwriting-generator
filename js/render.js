@@ -242,9 +242,10 @@
     var y0 = Math.max(0, Math.min(fb.y, fb.y + fb.h));
     var x1 = Math.min(area.pageW, Math.max(fb.x, fb.x + fb.w));
     var y1 = Math.min(area.pageH, Math.max(fb.y, fb.y + fb.h));
-    // 太小或基本等于整页 → 视作没调（也顺手清掉，避免老草稿里 {0,0,0,0} 污染排版）
-    if (x1 - x0 < 12 || y1 - y0 < 12) { delete opts.flowBox; return null; }
-    if (x1 - x0 > area.pageW - 1 && y1 - y0 > area.pageH - 1) { delete opts.flowBox; return null; }
+    // 太小或基本等于整页 → 本次视作没调（返回 null，不写回 opts —— 直接 delete 会改调用方 cfg，
+    //   导致撤回/还原时版面与备份状态不一致）。真正的复位由上层显式 cfg.flowBox = null 处理。
+    if (x1 - x0 < 12 || y1 - y0 < 12) return null;
+    if (x1 - x0 > area.pageW - 1 && y1 - y0 > area.pageH - 1) return null;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0, pageW: area.pageW, pageH: area.pageH, m: area.m };
   }
 
@@ -353,8 +354,10 @@
       var page2 = null, lineIdx2 = 0, yLine = 0;
       function newFlowPage() {
         if (page2 && page2.tokens.length) pages.push(page2);
+        // 印刷横线数：整页书写区能容纳的行数（横线纸画线用；此前被写死成 0 → 整页只剩 1 条线，v1.3 回归）。
+        var linesPerPage = Math.max(1, Math.floor(fArea.h / bodyLineH));
         page2 = { kind: pkind, paper: paper, area: fArea,
-          geom: { left: fArea.x, top: fArea.y, lineH: bodyLineH, linesPerPage: 0, fsMm: fsMm, flow: !!fArea.flow }, tokens: [] };
+          geom: { left: fArea.x, top: fArea.y, lineH: bodyLineH, linesPerPage: linesPerPage, fsMm: fsMm, flow: !!fArea.flow }, tokens: [] };
         lineIdx2 = 0; yLine = fArea.y;
       }
       // 把一条已经分好行的字符数组落成 token（行首缩进/行末悬挂开括号在此处理，与渲染位置一致）
@@ -562,7 +565,9 @@
     ctx.strokeStyle = ink; ctx.globalAlpha = 0.5;
     ctx.lineWidth = Math.max(1, mm2px(0.22, dpi));
     var lw = mm2px(14, dpi);
-    handLine(ctx, cx - lw, baseY - mm2px(6.4, dpi), cx + lw, baseY - mm2px(6.4, dpi), 0, Math.random);
+    // 用确定性 rng（idx 派生），别用 Math.random —— 页码线一抖就会导致预览/导出不一致
+    handLine(ctx, cx - lw, baseY - mm2px(6.4, dpi), cx + lw, baseY - mm2px(6.4, dpi), 0,
+      RNG.makeRng('margin:' + idx));
     ctx.globalAlpha = 0.85;
     var fs = mm2px(3.4, dpi);
     ctx.font = fs.toFixed(2) + 'px ' + (STAMP_FACE || '"Times New Roman",serif');
@@ -614,7 +619,8 @@
   // pressure 默认 1；0 = 完全均匀（老行为）。
   function inkColorFor(hex, rng, strength, pressure) {
     var b = parseInk(hex);
-    var s = (strength === undefined || strength === false) ? 1 : strength;
+    // strength：true/undefined=开(1)、false=关(0)、数字=直接用。此前 true 与 false 都算成 1，导致「墨色微变」开关无效。
+    var s = (strength === undefined || strength === true) ? 1 : (strength === false ? 0 : strength);
     var pr = (pressure === undefined) ? 1 : pressure;
     // k：>1 略深（按得重）/ <1 略浅（落笔轻）。范围克制约 0.82~1.14。
     var k = 1 + gauss(rng) * 0.06 * s * pr;
@@ -656,11 +662,13 @@
     _grunge.cv = cv; _grunge.size = S;
     return cv;
   }
-  var _gpat = null, _gpatCtx = null;
+  var _gpat = null;
   function grainPattern(ctx) {
-    if (_gpat && _gpatCtx === ctx) return _gpat;
+    // pattern 无状态、可跨 ctx 复用：之前按 ctx 判等，但每字传的都是同一个复用离屏 ctx →
+    // 等于每字重建一次 pattern（400 字/页就是 400 次）。改为全局缓存一次即可。
+    if (_gpat) return _gpat;
     var tile = paperGrainTile(); if (!tile) return null;
-    try { _gpat = ctx.createPattern(tile, 'repeat'); _gpatCtx = ctx; } catch (e) { _gpat = null; }
+    try { _gpat = ctx.createPattern(tile, 'repeat'); } catch (e) { _gpat = null; }
     return _gpat;
   }
 
@@ -671,7 +679,8 @@
     var W = Math.max(2, Math.ceil(w)), H = Math.max(2, Math.ceil(h));
     if (_tmpCv.width !== W) _tmpCv.width = W;
     if (_tmpCv.height !== H) _tmpCv.height = H;
-    var c = _tmpCv.getContext('2d');
+    // willReadFrequently：crispify 每字都要 getImageData 同步回读，关掉 GPU 回读路径可省一大截时间
+    var c = _tmpCv.getContext('2d', { willReadFrequently: true });
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, W, H);
     return _tmpCv;
@@ -695,8 +704,8 @@
     var y = mm2px(tk.y, dpi);
     var d = drift || { dy: 0, dx: 0, scale: 1, alpha: 1 };
 
-    var mess = cfg.messyRatio / 100;   // 0..1
-    var cramp = cfg.charRandom / 100;  // 0..1
+    var mess = (cfg.messyRatio || 0) / 100;   // 0..1（缺省兜 0：否则算出 NaN → drawImage 坐标 NaN，整页静默空白）
+    var cramp = (cfg.charRandom || 0) / 100;  // 0..1
 
     // 位置抖动（凌乱度）：整行漂移 + 每字微抖 + 用户逐行拖动微调
     var jx = d.dx + gauss(rng) * mess * sizePx * 0.11 + mm2px(tk.ox || 0, dpi);
@@ -887,7 +896,7 @@
     var rng = RNG.makeRng('page:' + layoutRes.seed + ':' + pageIdx);
     if (page.paper.kind === 'custom' && cfg.customImage) {
       var img = cfg.customImage;
-      var ir = img.width / img.height, cr = W / H, dw, dh, dx, dy;
+      var ir = (img.width && img.height) ? (img.width / img.height) : (W / H), cr = W / H, dw, dh, dx, dy;  // 图未解码/损坏时回落页面比，避免 NaN
       if (ir > cr) { dh = H; dw = H * ir; dx = (W - dw) / 2; dy = 0; }
       else { dw = W; dh = W / ir; dx = 0; dy = (H - dh) / 2; }
       ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
@@ -908,7 +917,7 @@
     var page = layoutRes.pages[pageIdx];
     var rng = RNG.makeRng('page:' + layoutRes.seed + ':' + pageIdx);
     var drng = RNG.makeRng('drift:' + layoutRes.seed + ':' + pageIdx);
-    var messy = cfg.messyRatio / 100;
+    var messy = (cfg.messyRatio || 0) / 100;
     var lines = tokensByLine(page);
     var layers = [];
     for (var li = 0; li < lines.length; li++) {
@@ -1018,7 +1027,7 @@
     // 自定义背景
     if (page.paper.kind === 'custom' && cfg.customImage) {
       var img = cfg.customImage;
-      var ir = img.width / img.height, cr = W / H, dw, dh, dx, dy;
+      var ir = (img.width && img.height) ? (img.width / img.height) : (W / H), cr = W / H, dw, dh, dx, dy;  // 图未解码/损坏时回落页面比，避免 NaN
       if (ir > cr) { dh = H; dw = H * ir; dx = (W - dw) / 2; dy = 0; }
       else { dw = W; dh = W / ir; dx = 0; dy = (H - dh) / 2; }
       ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
@@ -1033,7 +1042,7 @@
     var globalDx = (cfg.textOffset && cfg.textOffset.dx) || 0;
     var globalDy = (cfg.textOffset && cfg.textOffset.dy) || 0;
     var pageH = layoutRes.area.pageH;
-    var messy = cfg.messyRatio / 100;
+    var messy = (cfg.messyRatio || 0) / 100;
     // 逐字手写：先按「行」生成整体缓慢漂移（真人一行会整体起伏，而非每字乱跳）。
     var drng = RNG.makeRng('drift:' + layoutRes.seed + ':' + pageIdx);
     // 跨页项：一行被拖到相邻页后，仍画到本页画布上（越界自动裁掉）；rng/drng 按「源页」取，
@@ -1090,7 +1099,7 @@
     var gx = (cfg.textOffset && cfg.textOffset.dx) || 0;
     var gy = (cfg.textOffset && cfg.textOffset.dy) || 0;
     var pageH = layoutRes.area.pageH;
-    var messy = cfg.messyRatio / 100;
+    var messy = (cfg.messyRatio || 0) / 100;
     var nP = layoutRes.pages.length;
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'center';

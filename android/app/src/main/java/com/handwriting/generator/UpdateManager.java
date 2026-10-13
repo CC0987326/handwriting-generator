@@ -29,6 +29,20 @@ public class UpdateManager {
 
     private static final String TAG = "HW-Update";
 
+    // 国内可达的 GitHub 加速镜像前缀（含空串=直连）。网页层已择优，这里再兜一层：
+    // 网页给的 URL 下不动时，自动换其它镜像重试（国内直连 github.com 常被墙）。
+    private static final String[] MIRRORS = {
+        "https://gh-proxy.com/",
+        "https://ghproxy.net/",
+        "https://ghfast.top/",
+        "https://gh.llkk.cc/",
+        ""
+    };
+    private static final long MAX_ZIP_BYTES = 200L * 1024 * 1024;   // 热更包体积上限，防恶意/异常大文件写爆 filesDir
+    // 单飞：同一时刻只允许一个热更安装，避免两次并发共用同一个临时文件/目录互相破坏
+    private static final java.util.concurrent.atomic.AtomicBoolean INSTALLING =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     // ---------- 指针读写 ----------
     static String readSmallFile(File f) throws IOException {
         FileInputStream in = new FileInputStream(f);
@@ -89,10 +103,13 @@ public class UpdateManager {
      * @return 错误信息，null 表示成功
      */
     public static String install(File root, String zipUrl, String version) {
-        File tmpZip = new File(root, "download.tmp.zip");
-        File stage = new File(root, version);          // 目录名 = 版本号，与 active 指针一致
+        if (!INSTALLING.compareAndSet(false, true)) return "已有更新正在进行中";
+        File tmpZip = new File(root, "download." + System.nanoTime() + ".tmp.zip");   // 唯一临时名，避免并发互踩
+        String safeVer = sanitizeVersion(version);
+        File stage = new File(root, safeVer);          // 目录名 = 清洗后的版本号，与 active 指针一致
         try {
-            download(zipUrl, tmpZip);
+            if (safeVer.isEmpty()) return "版本号非法";
+            downloadAny(zipUrl, tmpZip);
             if (!isValidZip(tmpZip)) return "下载的更新包无效";
             deleteRec(stage);                          // 同版本重装：先清旧的
             if (!stage.mkdirs()) return "无法创建更新目录";
@@ -104,8 +121,8 @@ public class UpdateManager {
             if (active.isFile()) {
                 writeSmallFile(prevPtr(root), readSmallFile(active));
             }
-            writeSmallFile(pendingPtr(root), version);   // 看门狗：等网页 ack
-            writeSmallFile(active, version);
+            writeSmallFile(pendingPtr(root), safeVer);   // 看门狗：等网页 ack
+            writeSmallFile(active, safeVer);
             return null;
         } catch (Exception e) {
             Log.e(TAG, "install failed", e);
@@ -113,10 +130,39 @@ public class UpdateManager {
             return String.valueOf(e.getMessage());
         } finally {
             tmpZip.delete();
+            INSTALLING.set(false);
         }
     }
 
-    // ---------- 工具 ----------
+    // 版本号当目录名用：只允许 [0-9A-Za-z._-]，其余剔除，防目录注入
+    private static String sanitizeVersion(String v) {
+        if (v == null) return "";
+        return v.replaceAll("[^0-9A-Za-z._-]", "");
+    }
+
+    // ---------- 下载：优先用网页给的 URL，失败则依次换镜像前缀重试 ----------
+    private static void downloadAny(String url, File out) throws IOException {
+        IOException last = null;
+        String[] cands = candidates(url);
+        for (String u : cands) {
+            try { download(u, out); return; }
+            catch (IOException e) { last = e; Log.w(TAG, "下载失败，换源：" + u + " (" + e.getMessage() + ")"); }
+        }
+        throw (last != null ? last : new IOException("无可用的下载源"));
+    }
+
+    // 由原始链接生成候选下载地址：原样 + 各镜像前缀（已是镜像的就不再套）
+    private static String[] candidates(String url) {
+        java.util.ArrayList<String> list = new java.util.ArrayList<String>();
+        list.add(url);
+        boolean mirrored = false;
+        for (String m : MIRRORS) {
+            if (!m.isEmpty() && url.startsWith(m)) { mirrored = true; break; }
+        }
+        if (!mirrored) for (String m : MIRRORS) list.add(m + url);
+        return list.toArray(new String[0]);
+    }
+
     private static void download(String url, File out) throws IOException {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15000);
@@ -125,12 +171,17 @@ public class UpdateManager {
         conn.connect();
         int code = conn.getResponseCode();
         if (code < 200 || code >= 300) throw new IOException("HTTP " + code);
+        long cap = conn.getContentLength() > 0 ? Math.min((long) conn.getContentLength(), MAX_ZIP_BYTES) : MAX_ZIP_BYTES;
         InputStream in = conn.getInputStream();
         FileOutputStream fos = new FileOutputStream(out);
         try {
             byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
+            long total = 0; int n;
+            while ((n = in.read(buf)) > 0) {
+                total += n;
+                if (total > cap) throw new IOException("更新包超过体积上限");
+                fos.write(buf, 0, n);
+            }
         } finally {
             try { in.close(); } catch (IOException ignored) { }
             try { fos.close(); } catch (IOException ignored) { }
@@ -157,7 +208,9 @@ public class UpdateManager {
             byte[] buf = new byte[65536];
             while ((e = zin.getNextEntry()) != null) {
                 File out = new File(dest, e.getName());
-                if (!out.getCanonicalPath().startsWith(dest.getCanonicalPath())) {
+                // 用「目标根 + 分隔符」比较，避免前缀相同的兄弟目录（.../web/1.2 vs .../web/1.20）被误判为在内部
+                String destRoot = dest.getCanonicalPath() + File.separator;
+                if (!out.getCanonicalPath().startsWith(destRoot)) {
                     throw new IOException("非法路径：" + e.getName());
                 }
                 if (e.isDirectory()) {

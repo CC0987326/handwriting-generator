@@ -81,8 +81,12 @@ namespace HandwritingApp
             string payloadDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 AppName, "app-" + AppVer);
-            if (!File.Exists(Path.Combine(payloadDir, ".ok")))
-                ExtractPayload(payloadDir);
+            var okPath = Path.Combine(payloadDir, ".ok");
+            bool ready = false;
+            try { ready = File.Exists(okPath) && File.ReadAllText(okPath).Trim() == AppVer
+                          && File.Exists(Path.Combine(payloadDir, "view", "index.html")); }
+            catch (Exception) { ready = false; }
+            if (!ready) ExtractPayload(payloadDir);
             return payloadDir;
         }
 
@@ -136,9 +140,13 @@ namespace HandwritingApp
                 using (var payload = OpenPayloadStream())
                 using (var zip = new ZipArchive(payload, ZipArchiveMode.Read))
                 {
+                    string rootFull = Path.GetFullPath(payloadDir) + Path.DirectorySeparatorChar;
                     foreach (var e in zip.Entries)
                     {
                         string dest = Path.Combine(payloadDir, e.FullName.Replace('/', Path.DirectorySeparatorChar));
+                        // 防 Zip Slip：条目名带 ..\ 或绝对路径可能逃出 payloadDir
+                        if (!Path.GetFullPath(dest).StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+                            throw new IOException("载荷条目非法路径：" + e.FullName);
                         if (string.IsNullOrEmpty(e.Name)) { Directory.CreateDirectory(dest); continue; }
                         Directory.CreateDirectory(Path.GetDirectoryName(dest));
                         using (var es = e.Open())
@@ -205,6 +213,12 @@ namespace HandwritingApp
         public override void SetLength(long v) { throw new NotSupportedException(); }
         public override void Write(byte[] b, int o, int c) { throw new NotSupportedException(); }
         public override void Flush() { }
+        protected override void Dispose(bool disposing)
+        {
+            // 释放底层 exe 文件流：否则 using(SubStream) 只关了包装、底流要等 GC 终结才关
+            if (disposing) { try { if (_base != null) _base.Dispose(); } catch (Exception) { } }
+            base.Dispose(disposing);
+        }
     }
 
     internal sealed class MainForm : Form

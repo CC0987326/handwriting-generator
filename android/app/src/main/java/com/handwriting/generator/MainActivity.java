@@ -32,6 +32,7 @@ public class MainActivity extends Activity {
     private static final String BASE_URL = "https://" + HOST + "/index.html";
     private static final int REQ_FILE = 1001;
     private static final int REQ_CAMERA = 1002;
+    private static final int REQ_PERM = 1003;
 
     private Uri cameraOutUri;   // 当前拍照的输出目标（FileProvider URI）
 
@@ -48,6 +49,13 @@ public class MainActivity extends Activity {
         if (!liveRoot.exists()) liveRoot.mkdirs();
         // 看门狗：上次热更后没确认启动成功 → 回滚，避免更新包把 App 砖掉
         UpdateManager.rollbackIfUnconfirmed(liveRoot);
+
+        // Android 9 及以下把图片写进系统相册需要运行时存储权限（10+ 走 MediaStore 不需要）
+        if (android.os.Build.VERSION.SDK_INT < 29
+                && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                   != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_PERM);
+        }
 
         loader = new WebViewAssetLoader.Builder()
                 .setDomain(HOST)
@@ -75,6 +83,12 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // 本地资源只读：非 GET/HEAD 一律拒绝，避免 POST/PUT 拿到文件内容
+                String method = request.getMethod();
+                if (method != null && !"GET".equals(method) && !"HEAD".equals(method)) {
+                    return new WebResourceResponse("text/plain", "utf-8", 405, "Method Not Allowed",
+                            new java.util.HashMap<>(), null);
+                }
                 return loader.shouldInterceptRequest(request.getUrl());
             }
 
@@ -111,11 +125,12 @@ public class MainActivity extends Activity {
 
     /** 热更后重载：router 每次请求都重读 active 指针，直接重载即生效。 */
     public void reloadApp() {
-        runOnUiThread(() -> web.loadUrl(BASE_URL));
+        runOnUiThread(() -> { if (web != null && !isFinishing() && !isDestroyed()) web.loadUrl(BASE_URL); });
     }
 
     /** 拉起系统相机实时拍照（WebBridge.takePhoto 调）。结果在 onActivityResult 回网页。 */
     public void startCameraCapture() {
+        if (cameraOutUri != null) return;   // 已有一张待处理，忽略重复请求，避免覆盖/丢文件
         try {
             File dir = new File(getFilesDir(), "cam");
             if (!dir.exists()) dir.mkdirs();

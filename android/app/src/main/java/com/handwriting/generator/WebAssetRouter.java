@@ -60,8 +60,8 @@ public class WebAssetRouter implements WebViewAssetLoader.PathHandler {
         File live = activeRoot();
         if (live != null) {
             File f = new File(live, rel);
-            // 防目录穿越
-            if (f.isFile() && f.getAbsolutePath().startsWith(live.getAbsolutePath())) {
+            // 防目录穿越：用「根 + 分隔符」比较，避免前缀相同的兄弟目录被误判
+            if (f.isFile() && f.getAbsolutePath().startsWith(live.getAbsolutePath() + File.separator)) {
                 try {
                     InputStream in = new FileInputStream(f);
                     return new WebResourceResponse(mimeOf(rel), null, 200, "OK",
