@@ -170,10 +170,15 @@
     }
 
     if (dragMode === 'block') {
-      var pb = pageBBox(page);
-      if (pb) ov.appendChild(mk(pb, 'block'));
-      // 整篇形状调整：非格子纸时画出可拖的版面框 + 8 个把手
-      if (R.supportsFlowBox(page.paper)) drawFlowHandles(ov, pi, pxPerMm, area);
+      // 非格子纸：只画可拖的「版面形状框」(flow-box + 8 把手)——它已代表整篇范围，
+      //   别再叠旧的行包围框，否则两层框套在一起（用户报的「两个框」）。
+      // 格子纸：印刷格固定、不支持改形状，才画旧的行包围框用于「整篇平移」。
+      if (R.supportsFlowBox(page.paper)) {
+        drawFlowHandles(ov, pi, pxPerMm, area);
+      } else {
+        var pb = pageBBox(page);
+        if (pb) ov.appendChild(mk(pb, 'block'));
+      }
       return;
     }
     for (var sp = 0; sp < lastLayout.pages.length; sp++) {
