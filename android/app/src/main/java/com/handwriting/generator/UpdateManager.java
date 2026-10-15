@@ -39,6 +39,8 @@ public class UpdateManager {
         ""
     };
     private static final long MAX_ZIP_BYTES = 200L * 1024 * 1024;   // 热更包体积上限，防恶意/异常大文件写爆 filesDir
+    private static final int CONNECT_TIMEOUT = 15000;
+    private static final int READ_TIMEOUT = 15000;                  // 单次读阻塞上限（非整包上限）：流式下慢速源也能持续传完
     // 单飞：同一时刻只允许一个热更安装，避免两次并发共用同一个临时文件/目录互相破坏
     private static final java.util.concurrent.atomic.AtomicBoolean INSTALLING =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -151,22 +153,23 @@ public class UpdateManager {
         throw (last != null ? last : new IOException("无可用的下载源"));
     }
 
-    // 由原始链接生成候选下载地址：原样 + 各镜像前缀（已是镜像的就不再套）
+    // 由原始链接生成候选下载地址：原样 + 各镜像前缀。
+    // 若链接本身已带镜像前缀，先剥回原始 github 链接，再重新铺一遍所有镜像 ——
+    // 这样「网页层已选中的镜像」在原生侧下不动时，仍能回退到其它镜像，而不是死守一个源。
     private static String[] candidates(String url) {
+        String base = stripMirror(url);
         java.util.ArrayList<String> list = new java.util.ArrayList<String>();
-        list.add(url);
-        boolean mirrored = false;
-        for (String m : MIRRORS) {
-            if (!m.isEmpty() && url.startsWith(m)) { mirrored = true; break; }
-        }
-        if (!mirrored) for (String m : MIRRORS) list.add(m + url);
+        list.add(url);                                   // 网页层已择优的 URL 排第一，先用它
+        for (String m : MIRRORS) list.add(m + base);     // 其余镜像兜底
         return list.toArray(new String[0]);
     }
 
     private static void download(String url, File out) throws IOException {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(60000);
+        conn.setConnectTimeout(CONNECT_TIMEOUT);
+        // 读超时是「单次读阻塞」上限，不是整包时限 —— 流式下载下慢速源只要持续有数据就不会触发。
+        // 之前设 60000 又叠加「网页层已选出镜像 → candidates 只剩一个源」→ 慢源上极易判 timeout。
+        conn.setReadTimeout(READ_TIMEOUT);
         conn.setInstanceFollowRedirects(true);
         conn.connect();
         int code = conn.getResponseCode();
@@ -182,10 +185,19 @@ public class UpdateManager {
                 if (total > cap) throw new IOException("更新包超过体积上限");
                 fos.write(buf, 0, n);
             }
+            if (total <= 0) throw new IOException("下载为空");   // 空文件别当成功，交给下一个源
         } finally {
             try { in.close(); } catch (IOException ignored) { }
             try { fos.close(); } catch (IOException ignored) { }
         }
+    }
+
+    /** 某个源失败后，从它的 URL 里剥出原始 github.com 链接，供换镜像重试。 */
+    private static String stripMirror(String url) {
+        for (String m : MIRRORS) {
+            if (!m.isEmpty() && url.startsWith(m)) return url.substring(m.length());
+        }
+        return url;
     }
 
     private static boolean isValidZip(File f) {

@@ -100,6 +100,16 @@ textarea,input,select{caret-color:var(--verm)}
 [data-theme="dark"] .theme-btn .ic-sun{display:block}
 [data-theme="dark"] .theme-btn .ic-moon{display:none}
 .masthead .spacer{flex:1}
+/* 版本号 + 检查更新：位置固定在页眉，手机端也能一眼看到自己在哪版 */
+.masthead .ver{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ink-2);white-space:nowrap;position:relative}
+.masthead .ver b{font-family:var(--f-guide);font-size:12px;letter-spacing:.04em;color:var(--ink-2)}
+.masthead .ver-btn{
+  cursor:pointer;padding:3px 9px;background:transparent;border:1px solid var(--hair-2);border-radius:var(--r);
+  font-size:12px;color:var(--ink-2);transition:border-color .14s ease,color .14s ease,background .14s ease;
+}
+.masthead .ver-btn:hover{border-color:var(--ink-2);color:var(--ink);background:var(--hover-bg)}
+.masthead .ver-btn:active{background:var(--verm-tint);border-color:var(--verm)}
+.masthead .ver-note{font-size:12px;color:var(--verm);max-width:26ch;overflow:hidden;text-overflow:ellipsis}
 .masthead .stat{font-size:13px;font-weight:500;color:var(--ink-2);text-align:right;max-width:52ch;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
@@ -424,6 +434,9 @@ body.line-edit .flow-handle:active{background:var(--verm)}
     transform:rotate(45deg);transition:transform .18s ease;
   }
   .mast-fold.open::after{transform:rotate(-135deg);margin:-4px 0 0 -6px}
+  /* 版本号：钉在顶栏左下（主题/折叠按钮在右上），不随徽章折叠消失 */
+  .masthead .ver{position:absolute;left:12px;bottom:6px}
+  .masthead .ver-note{max-width:40vw}
 }
 .step.collapsible-closed .body, /* 无 .body 包裹的 section 直接藏标题后的兄弟节点 */
 section.step.collapsible-closed > *:not(.step-h){display:none}

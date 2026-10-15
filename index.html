@@ -21,6 +21,11 @@
   <div class="brand"><span class="seal">写</span>手写作业生成器</div>
   <span class="badge">本地版 · 免卡密 · 非商业</span>
   <div class="spacer"></div>
+  <span class="ver" id="verBox" title="当前版本 · 点此检查更新">
+    <b id="verLabel">v—</b>
+    <button class="ver-btn" id="btnCheckUpdate" type="button">检查更新</button>
+    <span class="ver-note" id="updateNote"></span>
+  </span>
   <span class="stat" id="stat">准备就绪</span>
   <button class="theme-btn" id="btnTheme" type="button" title="切换暗夜 / 白天模式" aria-label="切换暗夜模式" aria-pressed="false">
     <svg class="ic-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg>
@@ -304,7 +309,10 @@
 <script>
 /* 更新检查：等界面初始化完再查，别跟首屏抢资源 */
 (function () {
-  function go() { try { HW.updater.check(); } catch (e) { } }
+  function go() {
+    try { HW.updater.bindCheckButton(); } catch (e) { }   // 版本号 + 手动检查按钮
+    try { HW.updater.check(false); } catch (e) { }        // 启动静默检查（6 小时节流）
+  }
   if (document.readyState === 'complete') setTimeout(go, 2500);
   else window.addEventListener('load', function () { setTimeout(go, 2500); });
 })();

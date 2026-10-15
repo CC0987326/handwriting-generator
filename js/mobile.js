@@ -50,8 +50,11 @@
    * 目前只有在「热更新」等场景由 UpdateManager 调用，用来提示结果。 */
   window.__hwNativeCb = function (kind, ok, msg) {
     if (kind === 'update') {
+      // 无论成功失败都转给 updater：成功才记 DISMISS，失败清 pending 以便下次重试。
+      // 传 manual=true：让版本号旁的小字给出持久提示（toast 2.6 秒就没了）。
+      try { if (HW.updater && HW.updater._onUpdateResult) HW.updater._onUpdateResult(!!ok, msg, '', true); } catch (e) { }
       if (ok) toast('更新完成，正在重启界面…', 'ok');
-      else toast('更新失败：' + (msg || '未知原因'), 'err');
+      else toast('更新失败：' + (msg || '未知原因') + '（下次打开会自动重试）', 'err');
     } else if (kind === 'share') {
       if (!ok && msg) toast(msg, 'err');
     }

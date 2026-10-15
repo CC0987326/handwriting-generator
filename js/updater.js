@@ -195,20 +195,34 @@
     document.body.appendChild(box);
   }
 
-  function check() {
+  var pendingTag = '';   // 正在热更的目标 tag。**成功才写 DISMISS** —— 失败要能下次重试。
+  var checking = false;
+
+  // 界面提示（版本号按钮上的小字）。没这个元素（老页面）就静默跳过。
+  function setNote(txt) {
+    var el = document.getElementById('updateNote');
+    if (el) el.textContent = txt || '';
+  }
+
+  function check(force) {
     var cur = HW.appVersion || '0.0.0';
     var cv = parseVer(cur);
     if (!cv) return;
     if (typeof fetch !== 'function') return;
-    // 节流：6 小时内「成功」查过就不再查（force=true 可强制，测试用）
+    if (checking) return;                                  // 防手动连点重入
+    // 节流：6 小时内「成功」查过就不再查（force 可强制，手动按钮/测试用）
     var last = +(stored(CHECK_KEY) || 0);
-    if (!check.force && last && (Date.now() - last < INTERVAL)) return;
+    if (!force && last && (Date.now() - last < INTERVAL)) return;
+    if (force) setNote('检查中…');
+    checking = true;
     // 注意：先不写时间戳。只在成功拿到数据后才写 —— 否则国内网络抽一次风就锁死 6 小时不再查。
     fetchLatest().then(function (j) {
+      checking = false;
       store(CHECK_KEY, String(Date.now()));                // 成功才记，失败下次启动可重试
-      var lv = parseVer(j.tag_name || j.name);
-      if (!lv || !gt(lv, cv)) return;                      // 没有更新
-      if (stored(DISMISS_KEY) === (j.tag_name || j.name)) return;   // 这版已忽略过
+      var tag = j.tag_name || j.name;
+      var lv = parseVer(tag);
+      if (!lv || !gt(lv, cv)) { if (force) setNote('已是最新版 v' + cur.replace(/^v/i, '')); return; }   // 没有更新
+      if (stored(DISMISS_KEY) === tag) { if (force) setNote('已忽略 ' + tag + '，点「重试」可再更新'); return; }
 
       // Android 外壳：网页改动能热更就不重装 —— 后台下载新网页包并切换；
       // 只有原生外壳本身需要升级、或没有热更包时，才回退到「下载新 APK」。
@@ -216,26 +230,71 @@
       if (an && an.installUpdate) {
         var zip = webZipUrl(j);
         if (zip) {
-          store(DISMISS_KEY, j.tag_name || j.name);        // 热更静默进行，不再弹卡片
-          // 探测出能连的镜像 URL 再交给原生下载；全探测失败时把**原始链接**交出去
-          // （原生 UpdateManager 自带镜像兜底，别在这里塞一个「已知不可达」的前缀）。
+          // 关键：**绝不在这里写 DISMISS**。此前在这写 → 下载一旦失败（镜像超时/断流），
+          // 此后每次启动都命中上面的 DISMISS 判断，永远静默跳过，用户再也收不到更新。
+          pendingTag = tag;
+          if (force) setNote('发现 ' + tag + '，正在后台更新…');
           pickDownloadUrl(zip).then(function (u) {
-            try { an.installUpdate(u || zip, lv.join('.')); } catch (e) { }
+            try { an.installUpdate(u || zip, lv.join('.')); }
+            catch (e) { pendingTag = ''; onUpdateResult(false, String(e), tag, !!force); }
           });
           return;
         }
         var apk = apkUrl(j);
         if (apk) {
+          if (force) setNote('发现 ' + tag + '，请在浏览器里下载安装');
           // APK 下载走系统浏览器：探测能连的镜像，探测失败则用原始 GitHub 页（用户可自备代理）
-          pickDownloadUrl(apk).then(function (u) { card(cur, j.tag_name || j.name, u || (j.html_url || PAGE)); });
+          pickDownloadUrl(apk).then(function (u) { card(cur, tag, u || (j.html_url || PAGE)); });
           return;
         }
       }
 
       var url = j.html_url || PAGE;
-      card(cur, j.tag_name || j.name, url);
-    }).catch(function () { /* 全部源都失败：静默，且不写时间戳 → 下次启动重试 */ });
+      if (force) setNote('发现 ' + tag);
+      card(cur, tag, url);
+    }).catch(function () {
+      checking = false;
+      if (force) setNote('检查失败，请检查网络后重试');
+      /* 全部源都失败：静默，且不写时间戳 → 下次启动重试 */
+    });
   }
 
-  HW.updater = { check: check, openExternal: openExternal, _mirrorDownload: mirrorDownload };
+  /* 原生热更结果回调（mobile.js 的 __hwNativeCb 转发过来）。
+   * 成功才记 DISMISS；失败一律清掉 pendingTag，保证下次打开还会再试。 */
+  function onUpdateResult(ok, msg, tag, manual) {
+    tag = tag || pendingTag;
+    if (ok) { if (tag) store(DISMISS_KEY, tag); pendingTag = ''; if (manual) setNote('更新完成，重启生效'); }
+    else { pendingTag = ''; if (manual) setNote('更新失败，可点重试'); }
+  }
+
+  /* 自愈：若记录的「已忽略/已更新」版本比当前跑的还新，说明那次热更其实没生效
+   * （下载失败，或被看门狗回滚了），此时清掉记录，别让它永久挡住更新。 */
+  function healDismiss() {
+    var d = stored(DISMISS_KEY);
+    if (!d) return;
+    var dv = parseVer(d), cv = parseVer(HW.appVersion || '0.0.0');
+    if (dv && cv && gt(dv, cv)) { try { localStorage.removeItem(DISMISS_KEY); } catch (e) { } }
+  }
+
+  /* 手动「检查更新」按钮：绕过 6 小时节流强制查一次。 */
+  function bindCheckButton() {
+    var btn = document.getElementById('btnCheckUpdate');
+    var lbl = document.getElementById('verLabel');
+    if (lbl) lbl.textContent = 'v' + String(HW.appVersion || '0.0.0').replace(/^v/i, '');
+    healDismiss();
+    if (!btn || btn._hwBound) return;
+    btn._hwBound = true;
+    btn.onclick = function () {
+      // 若上一版被「以后再说」忽略过，手动点等于「重试」：清掉忽略记录
+      try { localStorage.removeItem(DISMISS_KEY); } catch (e) { }
+      setNote('检查中…');
+      check(true);
+    };
+  }
+
+  HW.updater = {
+    check: check, bindCheckButton: bindCheckButton,
+    _onUpdateResult: onUpdateResult,
+    openExternal: openExternal, _mirrorDownload: mirrorDownload
+  };
 })(window);
