@@ -8,8 +8,17 @@
   var $ = function (s) { return document.querySelector(s); };
   var $$ = function (s) { return Array.prototype.slice.call(document.querySelectorAll(s)); };
 
-  var cfg = Object.assign({}, CAT.DEFAULTS);
+  var ST = HW.store;        // 本地配置存储层（js/store.js）：跨版本继承参数 / 方案 / 默认纸张
+  // 启动参数：出厂默认 ← 上次参数快照（合并，新版本新增字段自动补齐）
+  var cfg = ST ? ST.mergeDefaults(CAT.DEFAULTS, ST.loadCfg()) : Object.assign({}, CAT.DEFAULTS);
   var customImage = null;   // 自定义背景 Image（当前选中的那张）
+  // 参数一变就落盘（防抖），下次打开还原 —— 版本更新也不重配
+  var persistTimer = 0;
+  function schedulePersist() {
+    if (!ST) return;
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(function () { ST.saveCfg(cfg); }, 400);
+  }
 
   /* ---------------- 纸张增删存 ---------------- */
   // 用户对内置纸张的增删记录；启动时套用到 CAT.PAPERS 上
@@ -865,7 +874,7 @@
       di.appendChild(left); di.appendChild(prev);
       di.onclick = function () {
         if (scope === 'en') cfg.fontIdEn = f.id; else cfg.fontIdCn = f.id;
-        buildFontCombo(); refreshStatus();
+        buildFontCombo(); refreshStatus(); schedulePersist();
         // 大字体按需加载：选中后再拉取，加载完刷新一次让示例字显示出来
         if (f.kind === 'bundled') {
           var info = $('#fontLoadInfo');
@@ -959,6 +968,9 @@
     $('#customBgRow').style.display = showUpload ? 'block' : 'none';
     if (showUpload && p.uploaded) $('#customBgName').value = p.name;
     refreshStatus();
+    schedulePersist();
+    refreshDefPaperUI();
+    buildPresetList();   // 纸张增删会改方案卡里显示的纸名
   }
 
   /* ---------------- 纸张增删 ---------------- */
@@ -1034,14 +1046,14 @@
     var el = $('#' + id), out = $('#' + id + 'Val');
     el.value = cfg[key];
     out.textContent = cfg[key];
-    el.oninput = function () { cfg[key] = +el.value; out.textContent = el.value; refreshStatus(); };
+    el.oninput = function () { cfg[key] = +el.value; out.textContent = el.value; refreshStatus(); schedulePersist(); };
   }
   // 中/英字号倍率滑块（显示为 "1.00×"）
   function bindSize(id, key) {
     var el = $('#' + id), out = $('#' + id + 'Val');
     el.value = cfg[key] || 1;
     out.textContent = (+el.value).toFixed(2) + '×';
-    el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(2) + '×'; };
+    el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(2) + '×'; schedulePersist(); };
     // sizeCn/sizeEn 在layout阶段写进每个 token 的 size，属「需重新排版」参数 → 只能用 doPreview（redrawAll 命中旧缓存不更新）。
     el.onchange = function () { if (lastPages.length && !busy) doPreview(); };
   }
@@ -1051,7 +1063,7 @@
     var el = $('#' + id), out = $('#' + id + 'Val');
     el.value = cfg[key] || 0;
     out.textContent = weightLabel(el.value);
-    el.oninput = function () { cfg[key] = +el.value; out.textContent = weightLabel(el.value); };
+    el.oninput = function () { cfg[key] = +el.value; out.textContent = weightLabel(el.value); schedulePersist(); };
     // 松开滑块立即按新粗细重画（预览已生成时）
     el.onchange = function () { if (lastPages.length) redrawAll(); };
   }
@@ -1060,7 +1072,7 @@
     var el = $('#' + id), out = $('#' + id + 'Val');
     el.value = cfg[key] || 0;
     out.textContent = (+el.value).toFixed(2);
-    el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(2); };
+    el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(2); schedulePersist(); };
     el.onchange = function () { if (lastPages.length && !busy) doPreview(); };
   }
   // 纯渲染参数滑块（改完只需重画，不用重新排版）
@@ -1068,7 +1080,7 @@
     var el = $('#' + id), out = $('#' + id + 'Val');
     el.value = cfg[key];
     out.textContent = (+el.value).toFixed(dec);
-    el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(dec); };
+    el.oninput = function () { cfg[key] = +el.value; out.textContent = (+el.value).toFixed(dec); schedulePersist(); };
     el.onchange = function () { if (lastPages.length) redrawAll(); };
   }
 
@@ -1437,14 +1449,28 @@
   }
   window.__hwOnCustomBg = onCustomBg;   // 手机端原生拍照回传用（mobile.js 调）
 
-  // 启动时把长期保存的上传纸张解码回来
-  function restoreUploadedPapers() {
+  // 启动时把长期保存的上传纸张解码回来。
+  // onDone：全部解码完成后回调 —— 用于「当前纸就是上传纸」时重设 customImage 并重画
+  //（上传纸的解码是异步的，applyStartupDefaults 跑到时 customImages 可能还空着）。
+  function restoreUploadedPapers(onDone) {
     var pend = paperStore.custom.filter(function (p) { return p.dataUrl; }).length;
+    if (!pend) { onDone && onDone(); return false; }
+    function finish() {
+      buildPaperList();
+      // 当前选中的是上传纸 → 把解码好的图解回 customImage，并（若已有预览）重画一次
+      var cp = curPaper();
+      if (cp && cp.uploaded) {
+        customImage = customImages[cp.id] || null;
+        refreshDefPaperUI();
+        if (lastLayout) doPreview();
+      }
+      onDone && onDone();
+    }
     paperStore.custom.forEach(function (p) {
       if (p.dataUrl) {
         var im = new Image();
-        im.onload = function () { customImages[p.id] = im; if (--pend <= 0) buildPaperList(); };
-        im.onerror = function () { if (--pend <= 0) buildPaperList(); };
+        im.onload = function () { customImages[p.id] = im; if (--pend <= 0) finish(); };
+        im.onerror = function () { if (--pend <= 0) finish(); };
         im.src = p.dataUrl;
       }
     });
@@ -1466,6 +1492,221 @@
       Object.assign(cfg, d.cfg || {});
       syncUI(); toast('草稿已载入', 'ok');
     } catch (e) { toast('载入失败', 'err'); }
+  }
+
+  /* ============================================================
+   * 方案（preset）· 默认纸张 · 还原默认
+   * 方案 = 一份 cfg 快照（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）。
+   * 存进 store.js 的固定 key，跨版本继承；导出成 .json 便于换机器。
+   * ============================================================ */
+  // 用一份快照整体覆盖当前参数（保留 cfg 引用，闭包到处用它）
+  function overwriteCfg(snap) {
+    var merged = ST.mergeDefaults(CAT.DEFAULTS, snap);
+    delete cfg.customImage;
+    for (var k in cfg) if (Object.prototype.hasOwnProperty.call(cfg, k)) delete cfg[k];
+    Object.assign(cfg, merged);
+    // 纸张兜底：方案里的纸可能已被删 → 回退出厂纸张，别让界面空白无选中
+    if (!CAT.PAPERS.filter(function (p) { return p.id === cfg.paperId; })[0]) cfg.paperId = CAT.DEFAULTS.paperId;
+    customImage = curPaper().uploaded ? (customImages[cfg.paperId] || null) : null;
+  }
+  function applyCfgSnapshot(snap) {
+    if (!snap) return false;
+    overwriteCfg(snap);
+    persistNow();
+    syncUI();
+    if (busy) { toast('参数已套用，等当前生成完再点一次预览即可看到', 'ok'); return true; }
+    if (lastLayout) doPreview();
+    return true;
+  }
+  function persistNow() { if (ST) ST.saveCfg(cfg); }
+
+  // 当前参数快照（方案内容）：剥掉不可序列化的运行期字段
+  function snapshotCfg() {
+    var c = ST.clone(cfg) || {};
+    delete c.customImage;
+    return c;
+  }
+
+  // 把当前纸张设为「默认纸张」（启动自动套用）
+  function setDefaultPaper() {
+    var p = curPaper();
+    ST.setDefPaper(p.id);
+    refreshDefPaperUI();
+    toast('已把「' + p.name + '」设为默认纸张', 'ok');
+  }
+  function clearDefaultPaper() {
+    ST.clearDefPaper();
+    // 让「清除」有明确可见的效果：当前纸张一并回到出厂纸张，重启也保持
+    cfg.paperId = CAT.DEFAULTS.paperId;
+    customImage = null;
+    persistNow();
+    onPaperChange();
+    if (lastLayout) doPreview();
+    toast('已清除默认纸张（回到出厂纸张）', 'ok');
+  }
+  function refreshDefPaperUI() {
+    var info = $('#defaultPaperInfo');
+    if (!info) return;
+    // 默认方案优先于默认纸张：启动了会先套默认方案，默认纸张不生效 —— 明确告诉用户，别让人觉得设了没用
+    var hasDefPreset = !!ST.getDefPreset();
+    var id = ST.getDefPaper();
+    if (!id) {
+      info.textContent = '当前默认：出厂纸张（' + defPaperName(CAT.DEFAULTS.paperId) + '）';
+    } else {
+      var p = CAT.PAPERS.filter(function (x) { return x.id === id; })[0];
+      info.textContent = '当前默认：' + (p ? p.name : ('（已删除：' + id + '）'));
+      if (!p) info.textContent += '　— 该纸已不在，启动将回退出厂纸张';
+    }
+    if (hasDefPreset) info.textContent += '　※ 已设默认方案，启动以方案为准';
+  }
+  function defPaperName(id) {
+    var p = CAT.PAPERS.filter(function (x) { return x.id === id; })[0];
+    return p ? p.name : '河南科技大学信稿纸';
+  }
+
+  /* ---------------- 方案列表（6 个位置）用界面 ---------------- */
+  function presetName(s, i) { return (s && s.name) ? s.name : ('方案 ' + (i + 1)); }
+  function buildPresetList() {
+    var box = $('#presetList');
+    if (!box) return;
+    var store = ST.loadPresets();
+    box.innerHTML = '';
+    var filled = 0;
+    store.slots.forEach(function (s, i) {
+      if (s) filled++;
+      var card = document.createElement('div');
+      card.className = 'preset-card' + (s ? ' on' : '') + (store.def === i ? ' def' : '');
+      var head = document.createElement('div');
+      head.className = 'ph';
+      var nm = document.createElement('div');
+      nm.className = 'pnm';
+      nm.textContent = s ? presetName(s, i) : ('空位 ' + (i + 1));
+      if (store.def === i) {
+        var tag = document.createElement('span'); tag.className = 'pdef'; tag.textContent = '默认';
+        nm.appendChild(tag);
+      }
+      head.appendChild(nm);
+      card.appendChild(head);
+      var meta = document.createElement('div');
+      meta.className = 'pmeta';
+      if (s) {
+        var pc = s.cfg || {};
+        var pname = (CAT.PAPERS.filter(function (x) { return x.id === pc.paperId; })[0] || {}).name || '纸张已删除';
+        meta.textContent = pname;
+      } else {
+        meta.textContent = '点下面「存到此处」保存当前参数';
+      }
+      card.appendChild(meta);
+
+      var row = document.createElement('div');
+      row.className = 'prow';
+      if (s) {
+        row.appendChild(mkPbtn('套用', function () {
+          if (applyCfgSnapshot(s.cfg)) toast('已套用方案：' + presetName(s, i), 'ok');
+        }));
+        row.appendChild(mkPbtn('存到此处', function () { savePresetAt(i, s.name); }));
+        row.appendChild(mkPbtn('重命名', function () { renamePresetAt(i); }));
+        if (store.def !== i) row.appendChild(mkPbtn('设为默认', function () { setDefaultPresetAt(i); }));
+        row.appendChild(mkPbtn('清除', function () { clearPresetAt(i); }, true));
+      } else {
+        row.appendChild(mkPbtn('存到此处', function () { savePresetAt(i, ''); }));
+      }
+      card.appendChild(row);
+      box.appendChild(card);
+    });
+    var info = $('#presetInfo');
+    if (info) info.textContent = filled + '/' + ST.SLOTS + ' 已保存';
+    refreshDefPaperUI();   // 默认方案状态会改变「默认纸张」提示里的说明
+  }
+  function mkPbtn(label, fn, danger) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn sm pbtn' + (danger ? ' danger' : '');
+    b.textContent = label;
+    b.onclick = fn;
+    return b;
+  }
+  function savePresetAt(i, keepName) {
+    var store = ST.loadPresets();
+    var name = keepName || ('方案 ' + (i + 1));
+    store.slots[i] = { name: name, cfg: snapshotCfg(), savedAt: new Date().toISOString() };
+    if (ST.savePresets(store)) { buildPresetList(); toast('已存到位置 ' + (i + 1) + '：' + name, 'ok'); }
+    else toast('保存失败（本地空间可能已满）', 'err');
+  }
+  function renamePresetAt(i) {
+    var store = ST.loadPresets();
+    if (!store.slots[i]) return;
+    var cur = presetName(store.slots[i], i);
+    var name = window.prompt('给这个方案起个名字：', cur);
+    if (name === null) return;
+    name = name.trim();
+    if (!name) { toast('名字不能为空', 'err'); return; }
+    if (name.length > 60) name = name.slice(0, 60);
+    store.slots[i].name = name;
+    if (ST.savePresets(store)) buildPresetList();
+    else toast('保存失败（本地空间可能已满）', 'err');
+  }
+  function setDefaultPresetAt(i) {
+    var store = ST.loadPresets();
+    if (!store.slots[i]) return;
+    store.def = (store.def === i) ? -1 : i;   // 再点一次取消默认
+    if (!ST.savePresets(store)) { toast('保存失败（本地空间可能已满）', 'err'); return; }
+    buildPresetList();
+    toast(store.def === i ? '已设为默认方案（启动自动套用）' : '已取消默认方案', 'ok');
+  }
+  function clearPresetAt(i) {
+    var store = ST.loadPresets();
+    if (!store.slots[i]) return;
+    if (!window.confirm('清除位置 ' + (i + 1) + ' 的方案「' + presetName(store.slots[i], i) + '」？')) return;
+    store.slots[i] = null;
+    if (store.def === i) store.def = -1;
+    if (ST.savePresets(store)) { buildPresetList(); toast('已清除', 'ok'); }
+    else toast('保存失败（本地空间可能已满）', 'err');
+  }
+
+  /* ---------------- 导入 / 导出方案 ---------------- */
+  function exportPresets() {
+    var pack = ST.exportPack();
+    var text = JSON.stringify(pack, null, 2);
+    var d = new Date();
+    var name = '手写方案_' + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '.json';
+    // 走 native.saveText：桌面弹「另存为」（含 JSON 过滤器）、Android 落下载目录、浏览器直接下载
+    if (HW.native && HW.native.saveText) {
+      HW.native.saveText(text, name, 'application/json').then(function (r) {
+        if (r && r.canceled) return;
+        if (r && r.error) { toast('导出失败：' + r.error, 'err'); return; }
+        var where = r && (r.path || r.label);
+        toast('方案已导出' + (where ? '：' + where : ''), 'ok');
+      }).catch(function () { download(new Blob([text], { type: 'application/json' }), name); toast('方案已导出', 'ok'); });
+    } else {
+      download(new Blob([text], { type: 'application/json' }), name); toast('方案已导出', 'ok');
+    }
+  }
+  function onImportPresetFile(file) {
+    if (!file) return;
+    var r = new FileReader();
+    r.onload = function () {
+      var obj = null;
+      try { obj = JSON.parse(r.result); } catch (e) { toast('文件不是有效的 JSON', 'err'); return; }
+      // 整体覆盖前确认（会冲掉现有 6 个位）
+      if (!window.confirm('导入会覆盖当前 6 个方案位，确定继续？')) return;
+      var res = ST.importPack(obj);
+      if (res.error) { toast('导入失败：' + res.error, 'err'); return; }
+      buildPresetList(); refreshDefPaperUI();
+      var n = res.presets.slots.filter(Boolean).length;
+      toast('已导入 ' + n + ' 个方案' + (res.defPaper ? '（含默认纸张）' : ''), 'ok');
+    };
+    r.onerror = function () { toast('读取失败', 'err'); };
+    r.readAsText(file, 'utf-8');
+  }
+
+  /* ---------------- 全部参数还原为默认 ---------------- */
+  // 出厂默认里 textOffset={0,0}、无 flowBox → overwriteCfg 重建后整篇/逐行微调自然清空，
+  // doPreview 会用新参数重排整篇，无需再单独 resetAdj。
+  function resetAllParams() {
+    if (!window.confirm('把所有参数（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）还原为出厂默认？\n（已保存的方案和默认纸张不受影响）')) return;
+    applyCfgSnapshot(ST.defaults());
+    toast('已还原为默认参数', 'ok');
   }
 
   /* ---------------- 按需联网加载脚本（Word/OCR 用，多 CDN 自动回退） ---------------- */
@@ -1574,32 +1815,53 @@
   }
 
   /* ---------------- 初始化 ---------------- */
+  // 启动套用用户设定：优先「默认方案」，没有则套「默认纸张」。两者皆无 = 用上次参数快照。
+  function applyStartupDefaults() {
+    if (!ST) return;
+    var dp = ST.getDefPreset();
+    if (dp && dp.cfg) {
+      overwriteCfg(dp.cfg);
+      return;
+    }
+    var pid = ST.getDefPaper();
+    if (pid) {
+      var exists = CAT.PAPERS.filter(function (p) { return p.id === pid; })[0];
+      if (exists) {
+        cfg.paperId = pid;
+        customImage = exists.uploaded ? (customImages[pid] || null) : null;
+      }
+      // 默认纸已被删除 → 静默回退出厂纸张，不清除记录（用户可能只是暂时删掉，加回来即恢复）
+    }
+  }
+
   function init() {
     loadPaperStore();
     applyPaperStore();
     restoreUploadedPapers();   // 把长期保存的上传纸张解码回来（解码完成后刷新列表）
+    applyStartupDefaults();    // 默认方案 / 默认纸张：启动自动套用（在 syncUI 前，界面显示的就是生效值）
 
     bindSlider('mistake-ratio', 'mistakeRate');
     bindSlider('messy-ratio', 'messyRatio');
     bindSlider('char-random', 'charRandom');
 
-    $('#inkColor').oninput = function () { cfg.inkColor = this.value; markInk(); };
+    $('#inkColor').oninput = function () { cfg.inkColor = this.value; markInk(); schedulePersist(); };
     $$('.inkdot').forEach(function (d) {
-      d.onclick = function () { cfg.inkColor = d.dataset.c; $('#inkColor').value = d.dataset.c; markInk(); };
+      d.onclick = function () { cfg.inkColor = d.dataset.c; $('#inkColor').value = d.dataset.c; markInk(); schedulePersist(); };
     });
-    $('#bold').onchange = function () { cfg.bold = this.checked; };
-    $('#inkJitter').onchange = function () { cfg.inkJitter = this.checked; };
-    $('#pageNumber').onchange = function () { cfg.pageNumber = this.checked; };
-    $('#dpi').onchange = function () { cfg.dpi = +this.value; };
-    $('#seed').oninput = function () { cfg.seed = this.value.trim(); };
-    $('#fontSize').oninput = function () { cfg.fontSizeMm = +this.value || 0; };
-    $('#lineSpacing').oninput = function () { cfg.lineSpacing = +this.value || 1; };
+    $('#bold').onchange = function () { cfg.bold = this.checked; schedulePersist(); };
+    $('#inkJitter').onchange = function () { cfg.inkJitter = this.checked; schedulePersist(); };
+    $('#pageNumber').onchange = function () { cfg.pageNumber = this.checked; schedulePersist(); };
+    $('#dpi').onchange = function () { cfg.dpi = +this.value; schedulePersist(); };
+    $('#seed').oninput = function () { cfg.seed = this.value.trim(); schedulePersist(); };
+    $('#fontSize').oninput = function () { cfg.fontSizeMm = +this.value || 0; schedulePersist(); };
+    $('#lineSpacing').oninput = function () { cfg.lineSpacing = +this.value || 1; schedulePersist(); };
     bindSize('sizeCn', 'sizeCn');
     bindSize('sizeEn', 'sizeEn');
     $('#btnSizeReset').onclick = function () {
       cfg.sizeCn = 1; cfg.sizeEn = 1;
       $('#sizeCn').value = 1; $('#sizeCnVal').textContent = '1.00×';
       $('#sizeEn').value = 1; $('#sizeEnVal').textContent = '1.00×';
+      schedulePersist();
     };
     bindWeight('weightCn', 'weightCn');
     bindWeight('weightEn', 'weightEn');
@@ -1607,6 +1869,7 @@
       cfg.weightCn = 0; cfg.weightEn = 0;
       $('#weightCn').value = 0; $('#weightCnVal').textContent = '标准';
       $('#weightEn').value = 0; $('#weightEnVal').textContent = '标准';
+      schedulePersist();
     };
     bindTrack('trackCn', 'trackCn');
     bindTrack('trackEn', 'trackEn');
@@ -1614,6 +1877,7 @@
       cfg.trackCn = 0; cfg.trackEn = 0;
       $('#trackCn').value = 0; $('#trackCnVal').textContent = '0.00';
       $('#trackEn').value = 0; $('#trackEnVal').textContent = '0.00';
+      schedulePersist();
       if (lastPages.length && !busy) doPreview();
     };
     bindRenderSlider('inkPressure', 'inkPressure', 1);
@@ -1677,7 +1941,7 @@
     syncUndoUI();
     $('#btnSeed').onclick = function () {
       cfg.seed = Math.random().toString(36).slice(2, 9);
-      $('#seed').value = cfg.seed; doPreview();
+      $('#seed').value = cfg.seed; schedulePersist(); doPreview();
     };
     $('#btnPngAll').onclick = function () { exportPNG('all'); };
     $('#btnPngOne').onclick = function () { exportPNG(0); };
@@ -1687,6 +1951,14 @@
     $('#btnSave').onclick = saveDraft;
     $('#btnLoad').onclick = loadDraft;
 
+    // 方案 / 默认纸张 / 还原默认
+    $('#btnSetDefPaper').onclick = setDefaultPaper;
+    $('#btnClearDefPaper').onclick = clearDefaultPaper;
+    $('#btnPresetExport').onclick = exportPresets;
+    $('#btnPresetImport').onclick = function () { $('#presetFile').click(); };
+    $('#presetFile').onchange = function () { onImportPresetFile(this.files[0]); this.value = ''; };
+    $('#btnResetAll').onclick = resetAllParams;
+
     $('#text').addEventListener('input', refreshStatus);
     syncEditUI();
     window.addEventListener('resize', function () {
@@ -1694,6 +1966,8 @@
     });
 
     syncUI();
+    buildPresetList();
+    refreshDefPaperUI();
 
     // 预加载内嵌的真实纸张纹理（data URI，本地立即解码）
     R.loadTextures();
@@ -1727,6 +2001,14 @@
     $('#text').placeholder = '把要写成手写的文字粘在这里（也可以导入 Word / 图片）。\n\n例：\n语文作业：请同学们认真抄写下面的段落，注意书写工整，标点符号要占格。\n\n春天来了，万物复苏。小草偷偷地从土里钻出来，嫩嫩的，绿绿的。\n\nEnglish Practice: Spring is coming, and everything comes back to life. Let us read the passage aloud.';
     refreshStatus();
     setTimeout(doPreview, 200);
+
+    // 卸载兜底：把防抖中（400ms）未落盘的最后一次改动立刻写掉，避免「刚调完就关」丢配置
+    function flushPersist() { if (ST) { clearTimeout(persistTimer); ST.saveCfg(cfg); } }
+    window.addEventListener('pagehide', flushPersist);
+    window.addEventListener('beforeunload', flushPersist);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') flushPersist();   // 手机端切后台/被杀前
+    });
   }
 
   document.addEventListener('DOMContentLoaded', init);

@@ -216,6 +216,26 @@
     // 最近一次导出落到的 content:// URI（Android 分支填，分享用）
     lastUris: [],
 
+    /* 导出「非图片」文件（方案 .json）：
+     *   Android —— <a download> 无效、saveImage 只能进相册，故走原生 saveFile 落下载目录。
+     *   其余平台 —— 复用 exportAll 的原生「另存为」（已支持 json 过滤器），与图片导出同一套对话框。
+     * 返回 Promise<{ok, label?, path?, error?}>。 */
+    saveText: function (text, name, mime) {
+      var blob = new Blob([text], { type: mime || 'application/json' });
+      if (and && and.saveFile) {
+        return blobToB64(blob).then(function (b64) {
+          var ret = and.saveFile(name, b64);
+          var r = (typeof ret === 'string') ? JSON.parse(ret) : ret;
+          return r || { ok: false, error: '未知错误' };
+        }).catch(function (e) { return { ok: false, error: (e && e.message) || String(e) }; });
+      }
+      return HW.native.exportAll([{ name: name }], function () { return blob; }).then(function (r) {
+        if (r && r.error) return { ok: false, error: r.error };
+        if (r && r.canceled) return { ok: false, canceled: true };
+        return { ok: true, label: (r && r.label) || name };
+      });
+    },
+
     /* items: [{name}]；renderFn(item, idx) -> Promise<Blob>
      * 返回 {ok, label, count} | {canceled:true} | {error} */
     exportAll: function (items, renderFn, onProgress) {

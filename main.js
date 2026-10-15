@@ -114,6 +114,7 @@ function registerSaveIpc() {
   const filtersOf = (name) => {
     const ext = extOf(name);
     if (ext === 'pdf') return [{ name: 'PDF 文件', extensions: ['pdf'] }];
+    if (ext === 'json') return [{ name: '方案文件', extensions: ['json'] }];
     if (ext === 'jpg' || ext === 'jpeg') return [{ name: 'JPEG 图片', extensions: ['jpg', 'jpeg'] }];
     return [{ name: 'PNG 图片', extensions: ['png'] }];
   };

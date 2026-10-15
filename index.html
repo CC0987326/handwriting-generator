@@ -92,6 +92,27 @@
           <input type="checkbox" id="customBgPersist" style="width:auto"> 长期保存（关闭浏览器后仍在）
         </label>
       </div>
+
+      <div class="paper-sect-h">默认纸张</div>
+      <span class="preset-hint" id="defaultPaperInfo">当前默认：出厂纸张</span>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn sm" id="btnSetDefPaper" type="button" style="flex:1">把当前纸张设为默认</button>
+        <button class="btn sm" id="btnClearDefPaper" type="button">清除</button>
+      </div>
+    </section>
+
+    <section class="step">
+      <h2 class="step-h"><i class="n">四</i>我的方案<span class="mono" id="presetInfo"></span></h2>
+      <span class="preset-hint">把当前所有参数（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）存进一个位置，随时一键套用。</span>
+      <div class="presets" id="presetList"></div>
+      <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn sm" id="btnPresetImport" type="button" style="flex:1">导入方案</button>
+        <button class="btn sm" id="btnPresetExport" type="button" style="flex:1">导出方案</button>
+        <input type="file" id="presetFile" accept=".json,application/json" hidden>
+      </div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn sm" id="btnResetAll" type="button" style="width:100%">全部参数还原为默认</button>
+      </div>
     </section>
 
     <!-- 附录页：调参台（默认收起） -->
@@ -273,6 +294,7 @@
 <div class="toast" id="toast"></div>
 
 <script src="js/catalog.js"></script>
+<script src="js/store.js"></script>
 <script src="js/textures.js"></script>
 <script src="js/render.js"></script>
 <script src="js/native.js"></script>

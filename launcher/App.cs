@@ -398,6 +398,7 @@ namespace HandwritingApp
         {
             string ext = (Path.GetExtension(name) ?? "").TrimStart('.').ToLowerInvariant();
             if (ext == "pdf") return "PDF 文件 (*.pdf)|*.pdf|所有文件 (*.*)|*.*";
+            if (ext == "json") return "方案文件 (*.json)|*.json|所有文件 (*.*)|*.*";
             if (ext == "jpg" || ext == "jpeg") return "JPEG 图片 (*.jpg)|*.jpg|所有文件 (*.*)|*.*";
             return "PNG 图片 (*.png)|*.png|所有文件 (*.*)|*.*";
         }

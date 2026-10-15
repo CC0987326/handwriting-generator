@@ -65,6 +65,53 @@ public class WebBridge {
         return r.toString();
     }
 
+    /**
+     * 存一个「非图片」文件（方案 .json）到系统下载目录（Download/手写作业生成器）。
+     * 相册只收图片，方案 JSON 不能塞进去（会变成打不开的坏图）——故单独一条通道。
+     * 返回 {ok, path}。
+     */
+    @JavascriptInterface
+    public String saveFile(String name, String b64) {
+        JSONObject r = new JSONObject();
+        try {
+            byte[] bytes = Base64.decode(b64, Base64.DEFAULT);
+            String safe = (name == null || name.isEmpty()) ? "方案.json" : name.replaceAll("[\\\\/:*?\"<>|]", "_");
+            String mime = safe.toLowerCase().endsWith(".json") ? "application/json" : "application/octet-stream";
+            String where = writeToDownloads(act, safe, mime, bytes);
+            if (where != null) { r.put("ok", true); r.put("path", where); }
+            else { r.put("ok", false); r.put("error", "写入下载目录失败"); }
+        } catch (Exception e) {
+            Log.e(TAG, "saveFile failed", e);
+            try { r.put("ok", false); r.put("error", String.valueOf(e.getMessage())); } catch (Exception ignored) { }
+        }
+        return r.toString();
+    }
+
+    private static String writeToDownloads(Context ctx, String name, String mime, byte[] bytes) throws Exception {
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.Downloads.DISPLAY_NAME, name);
+            cv.put(MediaStore.Downloads.MIME_TYPE, mime);
+            cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/手写作业生成器");
+            cv.put(MediaStore.Downloads.IS_PENDING, 1);
+            Uri uri = ctx.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) return null;
+            OutputStream os = ctx.getContentResolver().openOutputStream(uri);
+            try { os.write(bytes); } finally { os.close(); }
+            cv.clear();
+            cv.put(MediaStore.Downloads.IS_PENDING, 0);
+            ctx.getContentResolver().update(uri, cv, null, null);
+            return "Download/手写作业生成器/" + name;
+        } else {
+            File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "手写作业生成器");
+            if (!dir.exists()) dir.mkdirs();
+            File f = new File(dir, name);
+            FileOutputStream fos = new FileOutputStream(f);
+            try { fos.write(bytes); } finally { fos.close(); }
+            return f.getAbsolutePath();
+        }
+    }
+
     private static Uri writeToGallery(Context ctx, String name, String mime, byte[] bytes) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             ContentValues cv = new ContentValues();
