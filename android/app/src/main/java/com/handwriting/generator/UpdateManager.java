@@ -135,6 +135,9 @@ public class UpdateManager {
         File tmpZip = new File(root, "download." + System.nanoTime() + ".tmp.zip");   // 唯一临时名，避免并发互踩
         String safeVer = sanitizeVersion(version);
         File stage = new File(root, safeVer);          // 目录名 = 清洗后的版本号，与 active 指针一致
+        // 新包先解到这里，**全部校验通过后才换上**。绝不能边下边解、更不能在失败路径里删 stage ——
+        // 重装同一版本时 stage 就是「正在服役的目录」，一旦写入/下载失败就把它删掉 = 把好端端的现役版本毁了。
+        File staging = new File(root, "staging." + System.nanoTime());
         try {
             if (safeVer.isEmpty()) return "版本号非法";
             downloadAny(zipUrl, tmpZip);
@@ -144,31 +147,32 @@ public class UpdateManager {
             if (!zv.isEmpty() && !zv.equals(version.replace("v", ""))) {
                 return "更新包版本不符（包内 " + zv + "，期望 " + version + "）";
             }
-            deleteRec(stage);                          // 同版本重装：先清旧的
-            if (!stage.mkdirs()) return "无法创建更新目录";
-            unzip(tmpZip, stage);
+            deleteRec(staging);
+            if (!staging.mkdirs()) return "无法创建更新目录";
+            unzip(tmpZip, staging);
             // 必需文件齐全才算装成功（半截包通常缺 js/*）
-            if (!new File(stage, "index.html").isFile()
-                    || !new File(stage, "js/catalog.js").isFile()
-                    || !new File(stage, "js/app.js").isFile()
-                    || !new File(stage, "css/paper.css").isFile()) {
-                deleteRec(stage);
-                return "更新包缺少必要文件（下载可能不完整）";
+            if (!activeDirComplete(root, staging.getName())) {
+                return "更新包缺少必要文件（下载可能不完整）";   // finally 里清 staging，现役 stage 不动
             }
 
-            // 原子切换：记下当前版本为 previous，再指到新版本
+            // 新包已完整就位 —— 现在才动现役目录：记下当前版本，再用新目录顶上
             File active = activePtr(root);
-            if (active.isFile()) {
-                writeSmallFile(prevPtr(root), readSmallFile(active));
+            String prevVer = active.isFile() ? readSmallFile(active) : "";
+            deleteRec(stage);
+            if (!staging.renameTo(stage)) {              // 同盘改名是原子的；个别环境不支持就退化为拷贝
+                copyRec(staging, stage);
+                if (!activeDirComplete(root, safeVer)) return "更新包写入失败";
             }
+            if (!prevVer.isEmpty()) writeSmallFile(prevPtr(root), prevVer);
+            else if (prevPtr(root).isFile()) prevPtr(root).delete();
             writeSmallFile(pendingPtr(root), safeVer);   // 看门狗：等网页 ack
             writeSmallFile(active, safeVer);
             return null;
         } catch (Exception e) {
             Log.e(TAG, "install failed", e);
-            deleteRec(stage);                          // 装失败就把半成品清掉
-            return String.valueOf(e.getMessage());
+            return String.valueOf(e.getMessage());       // 失败只清 staging（见 finally），现役目录毫发无损
         } finally {
+            deleteRec(staging);
             tmpZip.delete();
             INSTALLING.set(false);
         }
@@ -338,6 +342,28 @@ public class UpdateManager {
                 zin.closeEntry();
             }
         } finally { zin.close(); }
+    }
+
+    /** 递归拷贝目录（renameTo 跨卷/被占用失败时的兜底）。 */
+    private static void copyRec(File src, File dst) throws IOException {
+        if (src.isDirectory()) {
+            if (!dst.isDirectory() && !dst.mkdirs()) throw new IOException("mkdirs " + dst);
+            File[] kids = src.listFiles();
+            if (kids != null) for (File k : kids) copyRec(k, new File(dst, k.getName()));
+        } else {
+            File parent = dst.getParentFile();
+            if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new IOException("mkdirs " + parent);
+            FileInputStream in = new FileInputStream(src);
+            FileOutputStream out = new FileOutputStream(dst);
+            try {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            } finally {
+                try { in.close(); } catch (IOException ignored) { }
+                try { out.close(); } catch (IOException ignored) { }
+            }
+        }
     }
 
     private static void deleteRec(File f) {
