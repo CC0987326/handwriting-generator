@@ -70,8 +70,34 @@ public class UpdateManager {
     private static File pendingPtr(File root) { return new File(root, "pending"); }
     private static File prevPtr(File root) { return new File(root, "previous"); }
 
-    /** 启动时调用：若上次换了包却没 ack（pending 还在），自动回滚到上一版。 */
+    /** active 指针指向的热更目录，是否含齐全的必需文件（半截包会缺 js/*）。 */
+    private static boolean activeDirComplete(File root, String ver) {
+        if (ver == null || ver.isEmpty()) return false;
+        File d = new File(root, ver);
+        return new File(d, "index.html").isFile()
+                && new File(d, "js/catalog.js").isFile()
+                && new File(d, "js/app.js").isFile()
+                && new File(d, "css/paper.css").isFile();
+    }
+
+    /** 启动时调用：清掉「残缺的 active 目录」；若上次换了包却没 ack（pending 还在），回滚到上一版。 */
     public static void rollbackIfUnconfirmed(File root) {
+        // (A) 无条件体检查：active 指向的目录必需文件不全（半截包/被清过）→ 直接弃用，回退内置资源。
+        //     这一条不依赖 pending —— 老版本曾把「界面新、js 缺」的残缺包 ack 成了正式版，靠这里自愈。
+        try {
+            File cur = activePtr(root);
+            if (cur.isFile()) {
+                String v = readSmallFile(cur);
+                if (!activeDirComplete(root, v)) {
+                    Log.w(TAG, "active dir incomplete (" + v + "), discarding");
+                    cur.delete();
+                    deleteRec(new File(root, v));
+                }
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "active heal failed", e);
+        }
+
         File pend = pendingPtr(root);
         if (!pend.isFile()) return;
         try {
@@ -79,7 +105,7 @@ public class UpdateManager {
             Log.w(TAG, "watchdog: pending boot not confirmed, rolling back to " + prev);
             pend.delete();
             File cur = activePtr(root);
-            if (!prev.isEmpty() && new File(new File(root, prev), "index.html").isFile()) {
+            if (!prev.isEmpty() && activeDirComplete(root, prev)) {
                 writeSmallFile(cur, prev);
             } else {
                 cur.delete();   // 没有可回滚的包 → 回到 APK 内置资源
@@ -112,11 +138,23 @@ public class UpdateManager {
         try {
             if (safeVer.isEmpty()) return "版本号非法";
             downloadAny(zipUrl, tmpZip);
-            if (!isValidZip(tmpZip)) return "下载的更新包无效";
+            if (!isValidZip(tmpZip)) return "下载的更新包不完整";
+            // 版本号核对：目标版本必须与包内 catalog.js 一致，杜绝「装错版/半截包」
+            String zv = zipAppVersion(tmpZip);
+            if (!zv.isEmpty() && !zv.equals(version.replace("v", ""))) {
+                return "更新包版本不符（包内 " + zv + "，期望 " + version + "）";
+            }
             deleteRec(stage);                          // 同版本重装：先清旧的
             if (!stage.mkdirs()) return "无法创建更新目录";
             unzip(tmpZip, stage);
-            if (!new File(stage, "index.html").isFile()) { deleteRec(stage); return "更新包缺少 index.html"; }
+            // 必需文件齐全才算装成功（半截包通常缺 js/*）
+            if (!new File(stage, "index.html").isFile()
+                    || !new File(stage, "js/catalog.js").isFile()
+                    || !new File(stage, "js/app.js").isFile()
+                    || !new File(stage, "css/paper.css").isFile()) {
+                deleteRec(stage);
+                return "更新包缺少必要文件（下载可能不完整）";
+            }
 
             // 原子切换：记下当前版本为 previous，再指到新版本
             File active = activePtr(root);
@@ -174,7 +212,8 @@ public class UpdateManager {
         conn.connect();
         int code = conn.getResponseCode();
         if (code < 200 || code >= 300) throw new IOException("HTTP " + code);
-        long cap = conn.getContentLength() > 0 ? Math.min((long) conn.getContentLength(), MAX_ZIP_BYTES) : MAX_ZIP_BYTES;
+        long declared = conn.getContentLength();
+        long cap = declared > 0 ? Math.min(declared, MAX_ZIP_BYTES) : MAX_ZIP_BYTES;
         InputStream in = conn.getInputStream();
         FileOutputStream fos = new FileOutputStream(out);
         try {
@@ -186,6 +225,12 @@ public class UpdateManager {
                 fos.write(buf, 0, n);
             }
             if (total <= 0) throw new IOException("下载为空");   // 空文件别当成功，交给下一个源
+            // 关键修复：镜像/连接中途被掐断时，read() 会「正常」返回 -1（不抛异常），
+            // 旧代码据此当成下完，装出「半截包」——界面变新、js 全缺、版本号不变。
+            // 这里用 Content-Length 对照，字节数对不上就当失败，换下一个源。
+            if (declared > 0 && total != declared) {
+                throw new IOException("下载不完整：" + total + "/" + declared + " 字节");
+            }
         } finally {
             try { in.close(); } catch (IOException ignored) { }
             try { fos.close(); } catch (IOException ignored) { }
@@ -200,17 +245,71 @@ public class UpdateManager {
         return url;
     }
 
+    /**
+     * 校验热更包是否**完整**。
+     * 旧实现只看头 2 字节是不是 'PK' —— 被截断的半截 zip 开头同样是 PK，照样放行，
+     * 于是「界面新、功能废」的残缺包被装上。这里改为结构性校验：
+     *   1) 头 tail 8 字节必须是中央目录结束记录（EOCD, 'PK\x05\x06'）——截断文件没有；
+     *   2) 头部 4 字节是本地文件头（'PK\x03\x04'）；
+     *   3) EOCD 里记的「中央目录偏移 + 长度」必须正好落在文件末尾 —— 精确防截断。
+     */
     private static boolean isValidZip(File f) {
-        if (!f.isFile() || f.length() < 4) return false;
+        if (!f.isFile() || f.length() < 22) return false;   // EOCD 最小 22 字节
+        long len = f.length();
         try {
-            FileInputStream in = new FileInputStream(f);
+            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
             try {
                 byte[] h = new byte[4];
-                if (in.read(h) != 4) return false;
-                // 'PK\x03\x04' 或 'PK\x05\x06'(空) 或 'PK\x07\x08'
-                return h[0] == 'P' && h[1] == 'K';
-            } finally { in.close(); }
+                raf.seek(0);
+                if (raf.read(h) != 4) return false;
+                if (!(h[0] == 'P' && h[1] == 'K' && h[2] == 3 && h[3] == 4)) return false;   // 本地文件头
+
+                // 在末尾 64KB 内从后往前找 EOCD 签名
+                int win = (int) Math.min(len, 65557);
+                byte[] tail = new byte[win];
+                raf.seek(len - win);
+                int got = 0;
+                while (got < win) { int n = raf.read(tail, got, win - got); if (n < 0) break; got += n; }
+                int eocd = -1;
+                for (int i = got - 22; i >= 0; i--) {
+                    if (tail[i] == 'P' && tail[i + 1] == 'K' && tail[i + 2] == 5 && tail[i + 3] == 6) { eocd = i; break; }
+                }
+                if (eocd < 0) return false;   // 没有中央目录 → 截断包
+                long cdSize = u32(tail, eocd + 12);
+                long cdOff = u32(tail, eocd + 16);
+                long eocdStart = (len - win) + eocd;
+                // 中央目录偏移应等于「EOCD 起点 - 中央目录长度」；对不上说明缺数据
+                return cdOff + cdSize == eocdStart;
+            } finally { raf.close(); }
         } catch (IOException e) { return false; }
+    }
+
+    private static long u32(byte[] b, int off) {
+        return (b[off] & 0xFFL) | ((b[off + 1] & 0xFFL) << 8)
+                | ((b[off + 2] & 0xFFL) << 16) | ((b[off + 3] & 0xFFL) << 24);
+    }
+
+    /** 从热更包里的 js/catalog.js 里读出 appVersion（形如 '1.3.7'）。读不到返回 ''。 */
+    private static String zipAppVersion(File zip) {
+        try {
+            ZipInputStream zin = new ZipInputStream(new FileInputStream(zip));
+            try {
+                ZipEntry e;
+                while ((e = zin.getNextEntry()) != null) {
+                    if ("js/catalog.js".equals(e.getName().replace('\\', '/'))) {
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = zin.read(buf)) > 0) bos.write(buf, 0, n);
+                        String t = new String(bos.toByteArray(), "UTF-8");
+                        java.util.regex.Matcher m =
+                                java.util.regex.Pattern.compile("appVersion\\s*=\\s*'([0-9]+\\.[0-9]+\\.[0-9]+)'").matcher(t);
+                        return m.find() ? m.group(1) : "";
+                    }
+                }
+            } finally { zin.close(); }
+        } catch (Exception e) { /* 读不出就让调用方按“无法核对”处理 */ }
+        return "";
     }
 
     private static void unzip(File zip, File dest) throws IOException {
