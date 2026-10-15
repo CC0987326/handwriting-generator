@@ -29,6 +29,10 @@
   --f-mono:"Cascadia Mono",Consolas,ui-monospace,"SFMono-Regular",monospace;
   --r:0px;                /* 无圆角：印刷感 */
   --hover-bg:#fff;        /* 悬停时的纸面提亮（暗夜下调为暗色） */
+  /* 展开 / 收起的面板层次：展开=抬起（更亮 + 阴影），收起=沉下（更暗 + 内陷） */
+  --panel-up:#fbf8ef;     /* 展开的版块底色（比正文纸更亮） */
+  --panel-down:#e4decc;   /* 收起的版块底色（比装订边更暗） */
+  --panel-line:rgba(34,39,45,.22);
   color-scheme:light;
 }
 
@@ -50,6 +54,9 @@
   --green:#8fae7a;
   --green-soft:#5b7350;
   --hover-bg:#2e3237;
+  --panel-up:#2b3036;     /* 展开：略亮 */
+  --panel-down:#15181c;   /* 收起：更暗 */
+  --panel-line:rgba(231,228,218,.20);
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -130,11 +137,18 @@ textarea,input,select{caret-color:var(--verm)}
 .preview{flex:1;overflow:auto;padding:26px 26px 40px;display:flex;flex-direction:column;align-items:center;gap:22px}
 
 /* ---------- 步骤 ---------- */
-.step{margin-bottom:22px}
+/* 版块做成「面板」：展开与收起有明显的明暗 / 异色区分，一眼看得出哪块开着 */
+.step{margin-bottom:14px;padding:13px 14px;border:1px solid var(--panel-line);border-left-width:3px;
+  background:var(--panel-up);box-shadow:0 1px 2px rgba(0,0,0,.05),0 5px 16px rgba(0,0,0,.04);
+  transition:background .18s ease,box-shadow .18s ease,border-color .18s ease}
 .step-h{
   display:flex;align-items:center;gap:9px;margin:0 0 11px;
   font-family:var(--f-guide);font-size:15px;font-weight:700;letter-spacing:.05em;color:var(--ink);
 }
+/* 收起态：底色沉下去、朱砂左描边消失、阴影收掉，与展开的亮面板形成对比 */
+.step.collapsible-closed{background:var(--panel-down);border-left-color:transparent;box-shadow:none}
+.step.collapsible-closed .step-h{margin-bottom:0;color:var(--ink-2)}
+.step.collapsible-closed .step-h .n{border-color:var(--ink-3);color:var(--ink-3)}
 .step-h .n{
   width:20px;height:20px;flex:none;display:grid;place-items:center;font-style:normal;
   border:1px solid var(--verm);color:var(--verm);font-family:var(--f-ui);font-size:12px;font-weight:600;line-height:1;
@@ -219,31 +233,44 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 .ftag.cn{background:var(--verm);color:#fff}
 .ftag.en{background:var(--green);color:#fff}
 
-/* 纸张选择 */
-.papers{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.papers[hidden]{display:none}
+/* 纸张选择：预览栏里的下拉（一行一个，可上下滑动） */
+.paper-pick{position:relative;display:inline-flex;align-self:center}
+.paper-drop{
+  position:absolute;top:calc(100% + 7px);right:0;z-index:60;width:288px;
+  background:var(--paper);border:1px solid var(--hair-2);
+  box-shadow:0 16px 40px rgba(34,39,45,.30);padding:8px;
+}
+.paper-drop[hidden]{display:none}
+.pdrop-h{font-size:12px;font-weight:700;color:var(--ink-2);padding:2px 4px 8px;border-bottom:1px solid var(--hair);
+  margin-bottom:7px;letter-spacing:.03em}
+.pdrop-list{display:flex;flex-direction:column;gap:7px;max-height:46vh;overflow-y:auto;padding-right:3px}
+.pdrop-list::-webkit-scrollbar{width:8px}
+.pdrop-foot{margin-top:8px;padding-top:8px;border-top:1px solid var(--hair)}
+.pdrop-foot .btn{width:100%}
 .paper-card{border:1px solid var(--hair-2);border-radius:var(--r);padding:7px;cursor:pointer;background:var(--paper);
-  display:flex;gap:8px;align-items:center;transition:border-color .14s ease,background .14s ease}
+  display:flex;gap:9px;align-items:center;transition:border-color .14s ease,background .14s ease}
 .paper-card:hover{border-color:var(--ink-2);background:var(--hover-bg)}
-.paper-card.on{border-color:var(--verm);box-shadow:inset 0 0 0 1px var(--verm)}
-.paper-card .sw{width:30px;height:40px;flex:none;box-shadow:0 1px 3px rgba(34,39,45,.28)}
-.paper-card .nm{font-size:12px;line-height:1.4;font-weight:500}
-/* 纸张名字单独成行，右上角留出「×」删除位 */
-.paper-card .nm{flex:1;min-width:0}
-/* 折叠：更多纸张 + 分段小标题 */
-.more-toggle{width:100%;justify-content:flex-start;gap:8px;margin-top:8px;font-weight:600;color:var(--ink-2)}
-.more-toggle .more-caret{width:0;height:0;border:5px solid transparent;border-left-color:var(--verm);transition:transform .16s ease}
-.more-toggle[aria-expanded="true"] .more-caret{transform:rotate(90deg)}
-.more-toggle .more-n{margin-left:auto;font-family:var(--f-mono);font-size:12px;color:var(--ink-3);font-weight:500}
-.paper-sect-h{display:flex;align-items:center;gap:8px;margin:14px 0 8px;font-size:12px;font-weight:700;
-  letter-spacing:.05em;color:var(--ink-2)}
-.paper-sect-h::after{content:"";flex:1;height:1px;background:var(--hair)}
-.paper-sect-h .n{font-family:var(--f-mono);color:var(--ink-3);font-weight:500;letter-spacing:0}
+.paper-card.on{border-color:var(--verm);box-shadow:inset 0 0 0 1px var(--verm);background:var(--verm-tint)}
+.paper-card .sw{width:28px;height:37px;flex:none;box-shadow:0 1px 3px rgba(34,39,45,.28)}
+.paper-card .sw.wide{width:37px;height:28px}   /* 横版纸：预览也横过来 */
+.paper-card .nm{font-size:12.5px;line-height:1.4;font-weight:500;flex:1;min-width:0}
+/* 「自定义」小标：上传/自建的纸一眼可辨 */
+.paper-card .ptag{flex:none;font-size:11px;color:var(--verm);border:1px solid var(--verm-soft);padding:0 4px;line-height:1.6}
 /* 卡片上的删除按钮：只有删得掉的纸才有；细线方形，hover 才显朱砂 */
-.paper-card .del{width:17px;height:17px;flex:none;display:grid;place-items:center;border:1px solid var(--hair-2);
-  color:var(--ink-3);font-family:var(--f-mono);font-size:12px;line-height:1;cursor:pointer;background:var(--paper)}
+.paper-card .del{width:19px;height:19px;flex:none;display:grid;place-items:center;border:1px solid var(--hair-2);
+  color:var(--ink-3);font-family:var(--f-mono);font-size:13px;line-height:1;cursor:pointer;background:var(--paper)}
 .paper-card .del:hover{border-color:var(--verm);color:var(--verm);background:var(--verm-tint)}
 .paper-card.user .del{border-color:var(--hair)}
+
+/* 上传 / 拍照弹层 */
+.bg-modal{position:fixed;inset:0;z-index:80;background:rgba(20,18,14,.44);display:flex;align-items:center;justify-content:center;padding:18px}
+.bg-modal[hidden]{display:none}
+.bg-modal-box{width:min(420px,100%);background:var(--paper);border:1px solid var(--hair-2);
+  box-shadow:0 22px 60px rgba(0,0,0,.36);padding:16px}
+.bg-modal-h{display:flex;align-items:center;justify-content:space-between;font-family:var(--f-guide);
+  font-size:15px;font-weight:700;letter-spacing:.04em;margin-bottom:12px}
+.bg-modal-x{cursor:pointer;color:var(--ink-3);font-size:20px;line-height:1;width:26px;height:26px;display:grid;place-items:center}
+.bg-modal-x:hover{color:var(--verm)}
 /* 上传区：虚线投放框 + 名称 + 长期保存 */
 .drop-zone{display:block;border:1px dashed var(--hair-2);background:var(--paper);padding:13px 12px;text-align:center;
   cursor:pointer;transition:border-color .14s ease,background .14s ease}
@@ -268,18 +295,21 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;bac
 .preset-card .pbtn.danger:hover{color:var(--verm);border-color:var(--verm)}
 #defaultPaperInfo{font-size:12px;color:var(--ink-2);display:block}
 
-/* 高级设置：折叠，像本子里的附录页 */
-.adv{margin:2px 0 20px}
+/* 高级设置：折叠，像本子里的附录页。与 .step 同一套「展开亮 / 收起暗」的层次 */
+.adv{margin:2px 0 18px;border:1px solid var(--panel-line);border-left-width:3px;background:var(--panel-up);
+  box-shadow:0 1px 2px rgba(0,0,0,.05),0 5px 16px rgba(0,0,0,.04);
+  transition:background .18s ease,box-shadow .18s ease,border-color .18s ease}
+.adv:not([open]){background:var(--panel-down);border-left-color:transparent;box-shadow:none}
 .adv>summary{
   list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;
-  font-family:var(--f-guide);font-size:15px;font-weight:700;letter-spacing:.05em;
-  padding:9px 0;border-top:1px solid var(--hair-2);border-bottom:1px solid var(--hair-2);
+  font-family:var(--f-guide);font-size:15px;font-weight:700;letter-spacing:.05em;padding:11px 14px;
 }
+.adv:not([open])>summary{color:var(--ink-2)}
 .adv>summary::-webkit-details-marker{display:none}
 .adv>summary::before{content:"";width:0;height:0;border:5px solid transparent;border-left-color:var(--verm);transition:transform .16s ease}
 .adv[open]>summary::before{transform:rotate(90deg)}
 .adv>summary::after{content:"调参台";margin-left:auto;font-family:var(--f-mono);font-size:12px;color:var(--ink-2);font-weight:500}
-.adv .body{padding-top:14px}
+.adv .body{padding:0 14px 16px}
 .adv .grp{margin-bottom:18px}
 .adv .grp>label.lbl{display:block;font-size:13px;color:var(--ink-2);margin-bottom:7px;letter-spacing:.03em}
 

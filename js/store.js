@@ -2,7 +2,7 @@
  * 手写作业生成器 · store.js  本地配置存储层
  *
  * 解决四件事：
- *   1) 纸张默认背景   —— 用户把任意纸张（含自传图）设为「默认纸张」，启动自动套用
+ *   1) 纸张背景       —— 记住「用户上次选的纸张」，启动自动套用（不再有单独的默认纸张设定）
  *   2) 方案保存       —— 6 个方案位，存/套用/重命名/清除/设为默认；导入 / 导出
  *   3) 参数还原默认   —— 由 app.js 调 defaults() 拿出厂参数
  *   4) 跨版本继承     —— 所有配置写在固定 key 的 localStorage 里，版本更新不丢；
@@ -11,7 +11,7 @@
  * 存储 key（稳定不变，是跨版本继承的前提）：
  *   hw_cfg_v1       当前参数快照（自动保存，下次打开还原）
  *   hw_presets_v1   方案表 { slots:[6], def:索引|-1 }
- *   hw_defpaper_v1  默认纸张 { id }
+ *   hw_lastpaper_v1 上次选的纸张 id（启动套用它）
  * 纸张增删/自传图仍走 catalog.js 的 hw_papers_v1（app.js 维护），这里不碰。
  * ============================================================ */
 (function (root) {
@@ -20,7 +20,8 @@
 
   var K_CFG = 'hw_cfg_v1';
   var K_PRESET = 'hw_presets_v1';
-  var K_DEFPAPER = 'hw_defpaper_v1';
+  var K_DEFPAPER = 'hw_defpaper_v1';     // 旧版「默认纸张」记录，仅用于启动时清掉（本版起改为「记住上次纸张」）
+  var K_LASTPAPER = 'hw_lastpaper_v1';   // 上次选择的纸张 id（启动自动套用）
   var SLOTS = 6;                     // 方案位数量
 
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -93,14 +94,23 @@
   }
   function clearCfg() { lsDel(K_CFG); }
 
-  /* ---------------- 默认纸张 ---------------- */
-  function getDefPaper() {
-    var raw = lsGet(K_DEFPAPER);
-    if (!raw) return '';
-    try { var o = JSON.parse(raw); return (o && o.id) || ''; } catch (e) { return ''; }
+  /* ---------------- 默认纸张（旧）/ 上次纸张（新） ----------------
+   * 本版起不再有「设为默认纸张」的设定：启动就自动套用「用户上次选的纸张」。
+   * 兼容处理：首次启动清掉旧版的「默认纸张」记录；若旧记录还在、而「上次纸张」还没写过，
+   * 就把它迁移过来（老用户升级后保持原样，不会因为这次改动突然换纸）。 */
+  function migrateDefPaper() {
+    var old = lsGet(K_DEFPAPER);
+    try {
+      if (old && !lsGet(K_LASTPAPER)) {
+        var o = JSON.parse(old);
+        if (o && o.id) lsSet(K_LASTPAPER, String(o.id));
+      }
+    } catch (e) { }
+    if (old) lsDel(K_DEFPAPER);   // 旧 key 用完即弃，避免以后又被迁移一次
   }
-  function setDefPaper(id) { lsSet(K_DEFPAPER, JSON.stringify({ id: String(id || '') })); }
-  function clearDefPaper() { lsDel(K_DEFPAPER); }
+  function getLastPaper() { return lsGet(K_LASTPAPER) || ''; }
+  function setLastPaper(id) { if (id) lsSet(K_LASTPAPER, String(id)); }
+  function clearLastPaper() { lsDel(K_LASTPAPER); }
 
   /* ---------------- 方案表 ---------------- */
   function emptySlots() {
@@ -127,20 +137,20 @@
   function clearPresets() { lsDel(K_PRESET); }
 
   /* ---------------- 整包导入 / 导出 ----------------
-   * 导出：一个 JSON，含方案表 + 默认纸张 + 默认方案指向。
-   * 导入：校验后整体覆盖（调用方先确认）。返回 {ok, presets, defPaper} 或 {error}。 */
+   * 导出：一个 JSON，含方案表 + 默认方案指向（纸张改为「记住上次选择」，不再导出）。
+   * 导入：校验后整体覆盖（调用方先确认）。返回 {ok, presets} 或 {error}。 */
+  // 只导出方案表（纸张默认改为「记住上次选择」，不再作为可导出设定）
   function exportPack() {
     return {
       app: 'handwriting-generator',
       kind: 'preset-pack',
       version: 1,
       exportedAt: new Date().toISOString(),
-      presets: loadPresets(),
-      defaultPaper: getDefPaper()
+      presets: loadPresets()
     };
   }
   // 只接受本程序导出的结构；宽松兼容「只有 slots 数组」的手写文件。
-  // 返回 {ok, presets, defPaper} 或 {error}；写入 localStorage 失败时如实返回 error（不再假成功）。
+  // 返回 {ok, presets} 或 {error}；写入 localStorage 失败时如实返回 error（不再假成功）。
   function importPack(obj) {
     if (!obj || typeof obj !== 'object') return { error: '文件内容不是有效的方案包' };
     var src = obj.presets || obj;
@@ -158,8 +168,7 @@
     var def = (src.def !== undefined && src.def !== null && isFinite(+src.def)) ? Math.floor(+src.def) : -1;
     if (def < 0 || def >= SLOTS || !slots[def]) def = -1;
     if (!savePresets({ slots: slots, def: def })) return { error: '写入本地存储失败（空间可能已满）' };
-    if (typeof obj.defaultPaper === 'string') setDefPaper(obj.defaultPaper);
-    return { ok: true, presets: { slots: slots, def: def }, defPaper: getDefPaper() };
+    return { ok: true, presets: { slots: slots, def: def } };
   }
 
   HW.store = {
@@ -170,7 +179,8 @@
 
     saveCfg: saveCfg, loadCfg: loadCfg, clearCfg: clearCfg,
 
-    getDefPaper: getDefPaper, setDefPaper: setDefPaper, clearDefPaper: clearDefPaper,
+    migrateDefPaper: migrateDefPaper,
+    getLastPaper: getLastPaper, setLastPaper: setLastPaper, clearLastPaper: clearLastPaper,
 
     loadPresets: loadPresets, savePresets: savePresets,
     getDefPreset: getDefPreset, clearPresets: clearPresets,

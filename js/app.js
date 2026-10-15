@@ -8,7 +8,7 @@
   var $ = function (s) { return document.querySelector(s); };
   var $$ = function (s) { return Array.prototype.slice.call(document.querySelectorAll(s)); };
 
-  var ST = HW.store;        // 本地配置存储层（js/store.js）：跨版本继承参数 / 方案 / 默认纸张
+  var ST = HW.store;        // 本地配置存储层（js/store.js）：跨版本继承参数 / 方案 / 上次纸张
   // 启动参数：出厂默认 ← 上次参数快照（合并，新版本新增字段自动补齐）
   var cfg = ST ? ST.mergeDefaults(CAT.DEFAULTS, ST.loadCfg()) : Object.assign({}, CAT.DEFAULTS);
   var customImage = null;   // 自定义背景 Image（当前选中的那张）
@@ -25,7 +25,6 @@
   var paperStore = { removed: [], custom: [] };
   var sessionPapers = [];   // 仅本次会话的上传纸张（objectURL 底图，不持久化，避免下次启动变成打不开的空壳）
   var customImages = {};    // id -> Image（当前会话内已解码的自定义纸张底图）
-  var moreOpen = false;     // 「更多纸张」是否展开
 
   function loadPaperStore() {
     try {
@@ -55,16 +54,18 @@
   var BASE_PAPERS = null;
   function applyPaperStore() {
     if (!BASE_PAPERS) BASE_PAPERS = CAT.PAPERS.slice();   // 首次调用前先留一份内置表
-    var keep = BASE_PAPERS.filter(function (p) {
+    var builtin = BASE_PAPERS.filter(function (p) {
       return p.id !== 'custom' && paperStore.removed.indexOf(p.id) < 0;
     });
-    keep.forEach(function (p) { p.builtin = true; p.removable = true; });   // 内置纸：可删，删了能加回
-    paperStore.custom.forEach(function (p) { p.user = true; p.removable = true; keep.push(p); });
-    sessionPapers.forEach(function (p) { p.user = true; p.removable = true; keep.push(p); });   // 仅本次会话的上传纸
+    builtin.forEach(function (p) { p.builtin = true; p.removable = true; });   // 内置纸：可删，删了能加回
+    // 用户自建的纸（含上传的）排到最前，满足「自定义的在最上面」
+    var mine = [];
+    paperStore.custom.forEach(function (p) { p.user = true; p.removable = true; mine.push(p); });
+    sessionPapers.forEach(function (p) { p.user = true; p.removable = true; mine.push(p); });   // 仅本次会话的上传纸
     var self = BASE_PAPERS.filter(function (p) { return p.id === 'custom'; })[0];
-    if (self) keep.push(self);   // 末尾保留「自定义背景(上传图片)」作为添加入口
+    if (self) builtin.push(self);   // 「自定义背景(上传图片)」入口留在内置段末尾（下拉里不渲染，仅供逻辑兜底）
     CAT.PAPERS.length = 0;
-    Array.prototype.push.apply(CAT.PAPERS, keep);
+    Array.prototype.push.apply(CAT.PAPERS, mine.concat(builtin));
   }
   var lastLayout = null;    // 最近一次排版结果
   var lastPages = [];       // 预览 canvas 列表
@@ -890,7 +891,8 @@
   function paperSwatch(p) {
     var st = p.style || {};
     var c = document.createElement('div');
-    c.className = 'sw';
+    // 横版纸缩略图也横过来（下拉里一行一个小预览，方向要跟实际一致）
+    c.className = 'sw' + (p.orientation === 'landscape' ? ' wide' : '');
     c.style.background = st.paper || '#fff';
     // 有真实纸张纹理照片（内嵌 data URI）时，优先用照片作底
     var texUrl = (st.tex && CAT && HW.textures && HW.textures[st.tex])
@@ -922,6 +924,7 @@
     return c;
   }
   // 单张纸张卡片；removable 为 true 时右上角带「×」删除
+  // 下拉里的一行纸张：小预览 + 名字（+ 删除）。点一下即换纸并自动重画，不用再点「生成预览」。
   function paperCard(p) {
     var card = document.createElement('div');
     card.className = 'paper-card' + (p.id === cfg.paperId ? ' on' : '') + (p.user || p.uploaded ? ' user' : '');
@@ -929,54 +932,80 @@
     var nm = document.createElement('div');
     nm.className = 'nm'; nm.textContent = p.name;
     card.appendChild(nm);
+    if (p.user || p.uploaded) {
+      var tag = document.createElement('span');
+      tag.className = 'ptag'; tag.textContent = '自定义';
+      card.appendChild(tag);
+    }
     if (p.removable) {
       var del = document.createElement('span');
       del.className = 'del'; del.textContent = '×'; del.title = '删除这张纸';
       del.onclick = function (e) { e.stopPropagation(); removePaper(p); };
       card.appendChild(del);
     }
-    card.onclick = function () { cfg.paperId = p.id; onPaperChange(); };
+    card.onclick = function () { selectPaper(p); };
     return card;
   }
+  // 选中纸张：换背景 → 关下拉 → 已有预览就立刻重画（点图即换，无需再点生成）
+  function selectPaper(p) {
+    cfg.paperId = p.id;
+    customImage = p.uploaded ? (customImages[p.id] || null) : null;
+    onPaperChange();
+    closePaperDrop();
+    if (lastLayout && !busy) doPreview();
+  }
   function buildPaperList() {
-    var box = $('#paperList'), mbox = $('#paperListMore'), cbox = $('#customPaperList');
-    var main = [], more = [], mine = [], n = 0;
-    CAT.PAPERS.forEach(function (p) {
-      if (p.kind === 'custom') { mine.push(p); return; }
-      if (p.more) { more.push(p); return; }
-      main.push(p);
-    });
-    // 用户自建的纸（含上传的），归到「自定义纸张」段
-    mine = mine.filter(function (p) { return p.id === 'custom'; })
-      .concat(mine.filter(function (p) { return p.id !== 'custom'; }));
-
-    box.innerHTML = ''; main.forEach(function (p) { box.appendChild(paperCard(p)); });
-    mbox.innerHTML = ''; more.forEach(function (p) { mbox.appendChild(paperCard(p)); });
-    cbox.innerHTML = ''; mine.forEach(function (p) { cbox.appendChild(paperCard(p)); });
-
-    mbox.hidden = !moreOpen;
-    var btn = $('#paperMoreBtn');
-    if (btn) btn.setAttribute('aria-expanded', moreOpen ? 'true' : 'false');
-    var mn = $('#paperMoreN');
-    if (mn) mn.textContent = '（' + more.length + '）';
+    var list = $('#paperDropList');
+    if (list) {
+      list.innerHTML = '';
+      // 顺序即 CAT.PAPERS（applyPaperStore 已把用户上传的排到最前），一行一个，可上下滑动。
+      // 末尾的 'custom' 只是「上传/拍照」的逻辑入口，由下拉底部的「＋」按钮承担，这里不渲染。
+      CAT.PAPERS.forEach(function (p) {
+        if (p.id === 'custom' && p.kind === 'custom' && !p.uploaded) return;
+        list.appendChild(paperCard(p));
+      });
+    }
+    var cur = curPaper();
+    var h = $('#paperDropH');
+    if (h) h.textContent = '当前：' + cur.name + '（点一下即换纸）';
+    var btn = $('#btnPaperPick');
+    if (btn) btn.setAttribute('aria-expanded', (paperDrop && !paperDrop.hidden) ? 'true' : 'false');
   }
   function onPaperChange() {
     buildPaperList();
-    var p = curPaper();
-    // 选中上传类纸张时才显示上传区
-    var showUpload = p.kind === 'custom' || p.uploaded;
-    $('#customBgRow').style.display = showUpload ? 'block' : 'none';
-    if (showUpload && p.uploaded) $('#customBgName').value = p.name;
     refreshStatus();
     schedulePersist();
-    refreshDefPaperUI();
-    buildPresetList();   // 纸张增删会改方案卡里显示的纸名
+    if (ST) ST.setLastPaper(cfg.paperId);   // 记住「上次选的纸」，启动自动套用
+    buildPresetList();                      // 纸张增删会改方案卡里显示的纸名
+  }
+
+  /* ---------------- 纸张下拉 ---------------- */
+  var paperDrop = null;                     // #paperDrop 元素
+  function openPaperDrop() { if (paperDrop) { paperDrop.hidden = false; buildPaperList(); } }
+  // 只在「开着」时才收起并重绘 —— 文档级 click 每次都会调到此处，关着就直接返回，省一次 DOM 重建
+  function closePaperDrop() { if (paperDrop && !paperDrop.hidden) { paperDrop.hidden = true; buildPaperList(); } }
+  function togglePaperDrop() { if (paperDrop) { paperDrop.hidden ? openPaperDrop() : closePaperDrop(); } }
+
+  /* 上传 / 拍照弹层 */
+  function openBgModal() {
+    var m = $('#bgModal');
+    if (!m) return;
+    // 每次打开都回到「长期保存」默认勾上，避免上次取消勾选后一直被记住
+    var cb = $('#customBgPersist'); if (cb) cb.checked = true;
+    var nm = $('#customBgName'); if (nm) nm.value = '';
+    m.hidden = false;
+    closePaperDrop();
+  }
+  function closeBgModal() { var m = $('#bgModal'); if (m) m.hidden = true; }
+  function wireBgModal() {
+    var m = $('#bgModal'), close = $('#bgModalClose');
+    if (close) close.onclick = closeBgModal;
+    if (m) m.onclick = function (e) { if (e.target === m) closeBgModal(); };   // 点空白关
   }
 
   /* ---------------- 纸张增删 ---------------- */
   function removePaper(p) {
-    var msg = p.removable ? ('删除纸张「' + p.name + '」？') : ('这是内置纸张，删除后可在「更多纸张」里重新加回。删除「' + p.name + '」？');
-    if (!window.confirm(msg)) return;
+    if (!window.confirm('删除纸张「' + p.name + '」？' + (p.builtin ? '内置纸张删除后需重装或清掉本地记录才能恢复。' : '上传的纸会连底图一起删掉，不可恢复。'))) return;
     if (p.builtin) {
       var next = []; for (var i = 0; i < CAT.PAPERS.length; i++) if (CAT.PAPERS[i].id !== p.id) next.push(CAT.PAPERS[i]);
       CAT.PAPERS.length = 0; Array.prototype.push.apply(CAT.PAPERS, next);
@@ -1442,6 +1471,7 @@
       cfg.paperId = paper.id;
       customImage = customImages[paper.id] || null;
       $('#customBgName').value = '';
+      closeBgModal();
       onPaperChange();
       toast('已添加纸张：' + paper.name + (persist ? '（已长期保存）' : ''), 'ok');
       if (lastLayout) doPreview();
@@ -1461,7 +1491,6 @@
       var cp = curPaper();
       if (cp && cp.uploaded) {
         customImage = customImages[cp.id] || null;
-        refreshDefPaperUI();
         if (lastLayout) doPreview();
       }
       onDone && onDone();
@@ -1495,7 +1524,7 @@
   }
 
   /* ============================================================
-   * 方案（preset）· 默认纸张 · 还原默认
+   * 方案（preset）· 上次纸张 · 还原默认
    * 方案 = 一份 cfg 快照（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）。
    * 存进 store.js 的固定 key，跨版本继承；导出成 .json 便于换机器。
    * ============================================================ */
@@ -1525,43 +1554,6 @@
     var c = ST.clone(cfg) || {};
     delete c.customImage;
     return c;
-  }
-
-  // 把当前纸张设为「默认纸张」（启动自动套用）
-  function setDefaultPaper() {
-    var p = curPaper();
-    ST.setDefPaper(p.id);
-    refreshDefPaperUI();
-    toast('已把「' + p.name + '」设为默认纸张', 'ok');
-  }
-  function clearDefaultPaper() {
-    ST.clearDefPaper();
-    // 让「清除」有明确可见的效果：当前纸张一并回到出厂纸张，重启也保持
-    cfg.paperId = CAT.DEFAULTS.paperId;
-    customImage = null;
-    persistNow();
-    onPaperChange();
-    if (lastLayout) doPreview();
-    toast('已清除默认纸张（回到出厂纸张）', 'ok');
-  }
-  function refreshDefPaperUI() {
-    var info = $('#defaultPaperInfo');
-    if (!info) return;
-    // 默认方案优先于默认纸张：启动了会先套默认方案，默认纸张不生效 —— 明确告诉用户，别让人觉得设了没用
-    var hasDefPreset = !!ST.getDefPreset();
-    var id = ST.getDefPaper();
-    if (!id) {
-      info.textContent = '当前默认：出厂纸张（' + defPaperName(CAT.DEFAULTS.paperId) + '）';
-    } else {
-      var p = CAT.PAPERS.filter(function (x) { return x.id === id; })[0];
-      info.textContent = '当前默认：' + (p ? p.name : ('（已删除：' + id + '）'));
-      if (!p) info.textContent += '　— 该纸已不在，启动将回退出厂纸张';
-    }
-    if (hasDefPreset) info.textContent += '　※ 已设默认方案，启动以方案为准';
-  }
-  function defPaperName(id) {
-    var p = CAT.PAPERS.filter(function (x) { return x.id === id; })[0];
-    return p ? p.name : '河南科技大学信稿纸';
   }
 
   /* ---------------- 方案列表（6 个位置）用界面 ---------------- */
@@ -1616,7 +1608,6 @@
     });
     var info = $('#presetInfo');
     if (info) info.textContent = filled + '/' + ST.SLOTS + ' 已保存';
-    refreshDefPaperUI();   // 默认方案状态会改变「默认纸张」提示里的说明
   }
   function mkPbtn(label, fn, danger) {
     var b = document.createElement('button');
@@ -1692,9 +1683,9 @@
       if (!window.confirm('导入会覆盖当前 6 个方案位，确定继续？')) return;
       var res = ST.importPack(obj);
       if (res.error) { toast('导入失败：' + res.error, 'err'); return; }
-      buildPresetList(); refreshDefPaperUI();
+      buildPresetList();
       var n = res.presets.slots.filter(Boolean).length;
-      toast('已导入 ' + n + ' 个方案' + (res.defPaper ? '（含默认纸张）' : ''), 'ok');
+      toast('已导入 ' + n + ' 个方案', 'ok');
     };
     r.onerror = function () { toast('读取失败', 'err'); };
     r.readAsText(file, 'utf-8');
@@ -1704,7 +1695,7 @@
   // 出厂默认里 textOffset={0,0}、无 flowBox → overwriteCfg 重建后整篇/逐行微调自然清空，
   // doPreview 会用新参数重排整篇，无需再单独 resetAdj。
   function resetAllParams() {
-    if (!window.confirm('把所有参数（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）还原为出厂默认？\n（已保存的方案和默认纸张不受影响）')) return;
+    if (!window.confirm('把所有参数（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）还原为出厂默认？\n（已保存的方案不受影响）')) return;
     applyCfgSnapshot(ST.defaults());
     toast('已还原为默认参数', 'ok');
   }
@@ -1806,16 +1797,13 @@
     $('#inkPressure').value = (cfg.inkPressure === undefined ? 1 : cfg.inkPressure); $('#inkPressureVal').textContent = (+$('#inkPressure').value).toFixed(1);
     $('#inkTexture').value = (cfg.inkTexture === undefined ? 0.4 : cfg.inkTexture); $('#inkTextureVal').textContent = (+$('#inkTexture').value).toFixed(2);
     addAllSteppers();
-    var cp = curPaper();
-    var showUpload = cp.kind === 'custom' || cp.uploaded;
-    $('#customBgRow').style.display = showUpload ? 'block' : 'none';
-    if (showUpload && cp.uploaded) $('#customBgName').value = cp.name;
     markInk();
     refreshStatus();
   }
 
   /* ---------------- 初始化 ---------------- */
-  // 启动套用用户设定：优先「默认方案」，没有则套「默认纸张」。两者皆无 = 用上次参数快照。
+  // 启动套用用户设定：优先「默认方案」，没有则记住的「上次纸张」。两者皆无 = 用上次参数快照。
+  // （上次纸张其实已在 cfg.paperId 里，这里只是确认它还在；不在就回退出厂纸张。）
   function applyStartupDefaults() {
     if (!ST) return;
     var dp = ST.getDefPreset();
@@ -1823,22 +1811,23 @@
       overwriteCfg(dp.cfg);
       return;
     }
-    var pid = ST.getDefPaper();
-    if (pid) {
-      var exists = CAT.PAPERS.filter(function (p) { return p.id === pid; })[0];
-      if (exists) {
-        cfg.paperId = pid;
-        customImage = exists.uploaded ? (customImages[pid] || null) : null;
-      }
-      // 默认纸已被删除 → 静默回退出厂纸张，不清除记录（用户可能只是暂时删掉，加回来即恢复）
+    var pid = ST.getLastPaper();
+    var exists = pid && CAT.PAPERS.filter(function (p) { return p.id === pid; })[0];
+    if (exists) {
+      cfg.paperId = pid;
+      customImage = exists.uploaded ? (customImages[pid] || null) : null;
+    } else if (cfg.paperId && !CAT.PAPERS.filter(function (p) { return p.id === cfg.paperId; })[0]) {
+      cfg.paperId = CAT.DEFAULTS.paperId;   // 记住的纸已被删 → 回退出厂纸张，别让界面无选中
+      customImage = null;
     }
   }
 
   function init() {
+    if (ST) ST.migrateDefPaper();   // 旧版「默认纸张」记录迁移成「上次纸张」，之后不再有那套设定
     loadPaperStore();
     applyPaperStore();
     restoreUploadedPapers();   // 把长期保存的上传纸张解码回来（解码完成后刷新列表）
-    applyStartupDefaults();    // 默认方案 / 默认纸张：启动自动套用（在 syncUI 前，界面显示的就是生效值）
+    applyStartupDefaults();    // 默认方案 / 上次纸张：启动自动套用（在 syncUI 前，界面显示的就是生效值）
 
     bindSlider('mistake-ratio', 'mistakeRate');
     bindSlider('messy-ratio', 'messyRatio');
@@ -1887,10 +1876,15 @@
     $('#customBg').onchange = function () { onCustomBg(this.files[0]); this.value = ''; };
     $('#btnCustomCam').onclick = function () { $('#customBgCam').click(); };
     $('#customBgCam').onchange = function () { onCustomBg(this.files[0]); this.value = ''; };
-    // 「更多纸张」折叠
-    $('#paperMoreBtn').onclick = function () { moreOpen = !moreOpen; buildPaperList(); };
-    // 上传区：点击 + 拖放
-    var dz = $('#customBgDrop'), dzWrap = $('#customBgRow');
+    // 纸张下拉：点按钮开合，点空白/外部关闭
+    paperDrop = $('#paperDrop');
+    $('#btnPaperPick').onclick = function (e) { e.stopPropagation(); togglePaperDrop(); };
+    $('#paperDrop').onclick = function (e) { e.stopPropagation(); };
+    document.addEventListener('click', function () { closePaperDrop(); });
+    $('#btnPaperAdd').onclick = function (e) { e.stopPropagation(); openBgModal(); };
+    wireBgModal();
+    // 上传弹层里的拖放
+    var dz = $('#customBgDrop'), dzWrap = $('#bgModal');
     if (dz) {
       dz.onclick = function () { $('#customBg').click(); };
       ['dragenter', 'dragover'].forEach(function (ev) {
@@ -1951,9 +1945,7 @@
     $('#btnSave').onclick = saveDraft;
     $('#btnLoad').onclick = loadDraft;
 
-    // 方案 / 默认纸张 / 还原默认
-    $('#btnSetDefPaper').onclick = setDefaultPaper;
-    $('#btnClearDefPaper').onclick = clearDefaultPaper;
+    // 方案 / 还原默认（纸张默认改为「记住上次选择」，不再有单独按钮）
     $('#btnPresetExport').onclick = exportPresets;
     $('#btnPresetImport').onclick = function () { $('#presetFile').click(); };
     $('#presetFile').onchange = function () { onImportPresetFile(this.files[0]); this.value = ''; };
@@ -1967,7 +1959,6 @@
 
     syncUI();
     buildPresetList();
-    refreshDefPaperUI();
 
     // 预加载内嵌的真实纸张纹理（data URI，本地立即解码）
     R.loadTextures();

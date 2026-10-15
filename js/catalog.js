@@ -83,7 +83,7 @@
   ];
 
   /* -------------------- 纸张表 --------------------
-   * more: true 表示「不怎么用到」的次要纸张，界面里折叠进「更多纸张」。
+   * more: true 表示「不怎么用到」的次要纸张（早先折叠进「更多纸张」，现在下拉里一并列出）。
    * kind: 'grid' 格子纸 / 'line' 横线纸 / 'blank' 空白纸 / 'custom' 自定义上传图
    * page: A4 / B5 / A3  (单位 mm)
    * orientation: 'portrait' 纵向 / 'landscape' 横向
@@ -190,7 +190,7 @@
 
   /* 应用版本号（单一出处）：更新检查拿它跟 GitHub 最新 Release 比。
    * 发新版时改这里 + package.json 的 version + launcher/App.cs 的 AppVer。 */
-  root.HW.appVersion = '1.3.6';
+  root.HW.appVersion = '1.3.7';
 
   /* 用户对纸张的增删记录（app.js 读它、改 PAPERS，再写回 localStorage）：
    *   removed: [内置纸张 id]         —— 被删掉的内置纸

@@ -153,8 +153,21 @@
     if (!android || !android.takePhoto) return;
     var btn = document.getElementById('btnCustomCam');
     if (btn) {
-      btn.onclick = function () { android.takePhoto(); };
+      // 相机按钮在「添加纸张」弹层里；点了先把弹层收掉（相机回来后再按需要弹），
+      // 否则系统相机返回时弹层还压在网页上，看不到刚加的纸。
+      btn.onclick = function () {
+        var m = document.getElementById('bgModal');
+        if (m) m.hidden = true;
+        try { android.takePhoto(); } catch (e) { }
+      };
     }
+    // 手机端下拉整体改占满宽度，纸名不挤
+    setTimeout(function () {
+      var d = document.getElementById('paperDrop');
+      if (d) { d.style.width = 'auto'; d.style.left = 'auto'; d.style.right = '-4px'; }
+      var l = document.getElementById('paperDropList');
+      if (l) l.style.maxHeight = '52vh';
+    }, 300);
     window.__hwCameraShot = function (dataUrl) {
       // dataURL → File，走与相册上传完全相同的链路
       var bin = atob(dataUrl.split(',')[1]);

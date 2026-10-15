@@ -73,41 +73,7 @@
     </section>
 
     <section class="step">
-      <h2 class="step-h"><i class="n">三</i>纸张背景</h2>
-      <div class="papers" id="paperList"></div>
-      <button class="btn sm more-toggle" id="paperMoreBtn" type="button" aria-expanded="false">
-        <span class="more-caret" aria-hidden="true"></span>更多纸张<span class="more-n" id="paperMoreN"></span>
-      </button>
-      <div class="papers" id="paperListMore" hidden></div>
-
-      <div class="paper-sect-h">自定义纸张</div>
-      <div class="papers" id="customPaperList"></div>
-      <div id="customBgRow" style="display:none;margin-top:11px">
-        <label for="customBg" class="drop-zone" id="customBgDrop">
-          <span class="dz-t">点击或把图片拖到这里</span>
-          <span class="dz-h">整页铺满；勾选「长期保存」可跨会话保留</span>
-        </label>
-        <input type="file" id="customBg" accept="image/*" hidden>
-        <input type="file" id="customBgCam" accept="image/*" capture="environment" hidden>
-        <div class="row" style="gap:8px;margin-top:8px">
-          <button class="btn sm" id="btnCustomCam" type="button" style="flex:1">📷 相机拍照</button>
-        </div>
-        <input type="text" id="customBgName" placeholder="纸张名称（可留空）" style="margin-top:8px">
-        <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--ink-2);margin-top:8px;cursor:pointer">
-          <input type="checkbox" id="customBgPersist" style="width:auto"> 长期保存（关闭浏览器后仍在）
-        </label>
-      </div>
-
-      <div class="paper-sect-h">默认纸张</div>
-      <span class="preset-hint" id="defaultPaperInfo">当前默认：出厂纸张</span>
-      <div class="row" style="gap:8px;margin-top:8px">
-        <button class="btn sm" id="btnSetDefPaper" type="button" style="flex:1">把当前纸张设为默认</button>
-        <button class="btn sm" id="btnClearDefPaper" type="button">清除</button>
-      </div>
-    </section>
-
-    <section class="step">
-      <h2 class="step-h"><i class="n">四</i>我的方案<span class="mono" id="presetInfo"></span></h2>
+      <h2 class="step-h"><i class="n">三</i>我的方案<span class="mono" id="presetInfo"></span></h2>
       <span class="preset-hint">把当前所有参数（字体 / 纸张 / 字号 / 墨色 / 凌乱度…）存进一个位置，随时一键套用。</span>
       <div class="presets" id="presetList"></div>
       <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">
@@ -276,6 +242,16 @@
       <span class="t">预览</span>
       <span class="hint">预览为压缩图，导出为高清无水印</span>
       <div class="spacer"></div>
+      <span class="paper-pick">
+        <button class="btn sm paper-pick-btn" id="btnPaperPick" type="button" aria-expanded="false" title="选择纸张背景">纸张背景</button>
+        <div class="paper-drop" id="paperDrop" hidden>
+          <div class="pdrop-h" id="paperDropH">选择纸张背景</div>
+          <div class="pdrop-list" id="paperDropList"></div>
+          <div class="pdrop-foot">
+            <button class="btn sm" id="btnPaperAdd" type="button">＋ 上传 / 拍照</button>
+          </div>
+        </div>
+      </span>
       <button class="btn sm" id="btnLineEdit" type="button" aria-pressed="false" title="微调：拖动文字对齐横线">逐行微调</button>
       <span class="modes" id="modeLineEdit" style="display:none">
         <button class="btn sm" id="btnModeLine" type="button" title="拖动单行；点一下框可多选，多选后一起拖">逐行</button>
@@ -294,6 +270,26 @@
       </div>
     </div>
   </main>
+</div>
+
+<!-- 上传 / 拍照自定义纸张：隐藏弹层，「纸张背景」下拉里点「＋ 上传 / 拍照」时弹出 -->
+<div class="bg-modal" id="bgModal" hidden>
+  <div class="bg-modal-box">
+    <div class="bg-modal-h">添加纸张背景<span class="bg-modal-x" id="bgModalClose" role="button" tabindex="0" title="关闭">×</span></div>
+    <label for="customBg" class="drop-zone" id="customBgDrop">
+      <span class="dz-t">点击或把图片拖到这里</span>
+      <span class="dz-h">整页铺满；默认长期保留，取消勾选则关闭后不再保留</span>
+    </label>
+    <input type="file" id="customBg" accept="image/*" hidden>
+    <input type="file" id="customBgCam" accept="image/*" capture="environment" hidden>
+    <div class="row" style="gap:8px;margin-top:8px">
+      <button class="btn sm" id="btnCustomCam" type="button" style="flex:1">📷 相机拍照</button>
+    </div>
+    <input type="text" id="customBgName" placeholder="纸张名称（可留空）" style="margin-top:8px">
+    <label style="display:flex;align-items:center;gap:7px;font-size:13px;color:var(--ink-2);margin-top:8px;cursor:pointer">
+      <input type="checkbox" id="customBgPersist" checked style="width:auto"> 长期保存（关闭浏览器后仍在）
+    </label>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
