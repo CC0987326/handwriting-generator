@@ -161,13 +161,6 @@
         try { android.takePhoto(); } catch (e) { }
       };
     }
-    // 手机端下拉整体改占满宽度，纸名不挤
-    setTimeout(function () {
-      var d = document.getElementById('paperDrop');
-      if (d) { d.style.width = 'auto'; d.style.left = 'auto'; d.style.right = '-4px'; }
-      var l = document.getElementById('paperDropList');
-      if (l) l.style.maxHeight = '52vh';
-    }, 300);
     window.__hwCameraShot = function (dataUrl) {
       // dataURL → File，走与相册上传完全相同的链路
       var bin = atob(dataUrl.split(',')[1]);
@@ -178,12 +171,71 @@
     };
   }
 
+  /* ---------- 纸张背景下拉：手机端改为贴屏幕右缘浮层 ----------
+   * 原来是 .deskbar 里的 position:absolute 下拉，窄屏下两个毛病：
+   *   ① 祖先 .desk 是 overflow:hidden，下拉一长就被裁掉；
+   *   ② 宽 288px 靠右对齐时往左溢出，成了挤在左边那根「挡住纸面的柱子」。
+   * 改成 position:fixed 相对视口定位：右缘留 8px、顶到「纸张背景」按钮下方，
+   * 宽度按视口收敛，高度取「视口底减去面板顶再留 8px」并封顶 72vh——无论列表多长
+   * 都完整落在屏幕内、压不到手写纸的正文区，且不依赖任何祖先的定位/裁剪。 */
+  function placePaperDrop() {
+    if (!android) return;
+    var d = document.getElementById('paperDrop');
+    if (!d || d.hidden) return;
+    var btn = document.getElementById('btnPaperPick');
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var MINH = 150;                           // 面板最小高度：再挤也留出可滚的列表
+    var MAXH = Math.round(vh * 0.72);          // 上限：始终是「下拉」，不做整屏遮罩
+    var r = btn ? btn.getBoundingClientRect() : { bottom: 96 };
+    var right = 8;                            // 贴屏幕右缘（不是贴按钮，按用户要求）
+    // 默认吊在按钮正下方；下方放不下整整一屏高就改成贴屏幕底（盖住按钮也无妨，
+    // 点面板外任意处即收起），总之面板必须完整落在视口内、绝不越出屏幕。
+    var top = Math.round((r.bottom || 96) + 7);
+    var pinBottom = (top + MINH > vh);
+    d.style.position = 'fixed';
+    d.style.left = 'auto';
+    d.style.right = right + 'px';
+    d.style.width = 'auto';
+    d.style.maxWidth = (vw - right - 8) + 'px';
+    d.style.overflowY = 'auto';
+    if (pinBottom) {
+      d.style.top = 'auto';
+      d.style.bottom = '8px';
+      d.style.maxHeight = Math.max(MINH, Math.min(vh - 16, MAXH)) + 'px';
+    } else {
+      d.style.bottom = 'auto';
+      d.style.top = top + 'px';
+      d.style.maxHeight = Math.max(MINH, Math.min(vh - top - 8, MAXH)) + 'px';
+    }
+    // 列表不再自己定高，交给外层 max-height 统一收敛（避免双滚动条）
+    var l = document.getElementById('paperDropList');
+    if (l) { l.style.maxHeight = 'none'; l.style.overflow = 'visible'; }
+  }
+
+  function wirePaperDrop() {
+    if (!android) return;
+    var btn = document.getElementById('btnPaperPick');
+    if (!btn || btn._hwDrop) return;
+    btn._hwDrop = true;
+    var d = document.getElementById('paperDrop');
+    if (!d) return;
+    // 面板由 app.js 的 onclick 打开；rAF 保证在它跑完、面板可见之后再摆位。
+    btn.addEventListener('click', function () {
+      requestAnimationFrame(function () { placePaperDrop(); });
+    });
+    var reflow = function () { if (!d.hidden) placePaperDrop(); };
+    window.addEventListener('resize', reflow);
+    window.addEventListener('scroll', reflow, true);   // 捕获任意滚动容器
+    window.addEventListener('orientationchange', function () { setTimeout(placePaperDrop, 220); });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     setTimeout(wireCamera, 400);   // 等 app.js 绑完自定义纸张区
     setTimeout(injectShare, 0);
     setTimeout(injectAccordion, 0);
     setTimeout(injectExportFold, 0);
     setTimeout(injectMastheadFold, 0);
+    setTimeout(wirePaperDrop, 300);   // 等 app.js 绑完「纸张背景」按钮
     // 首屏逻辑跑通 → 告诉原生「本次启动成功」，撤销看门狗回滚标记
     setTimeout(function () {
       bootOkSent = true;
